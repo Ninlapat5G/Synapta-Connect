@@ -185,15 +185,15 @@ pub async fn wait_for_kill(app: &App, device: &Option<String>, mut kills: tokio:
 /// ช่อง connection ที่ "ยังไม่รู้ว่าเป็นใคร" (กำลัง handshake หรือไม่มีใบรับรอง) — แยกจากช่องของอุปกรณ์ที่จับคู่แล้ว
 /// และจำกัดต่อ IP ต้นทาง ไม่งั้นคนเดียวเปิด connection เปล่าค้างไว้ก็แย่งช่องของเจ้าของเครื่องจนต่อไม่ได้
 #[derive(Default)]
-struct PreAuth(std::sync::Mutex<HashMap<IpAddr, usize>>);
+pub(crate) struct PreAuth(std::sync::Mutex<HashMap<IpAddr, usize>>);
 
-struct PreAuthSlot {
+pub(crate) struct PreAuthSlot {
     owner: Arc<PreAuth>,
     ip: IpAddr,
 }
 
 impl PreAuth {
-    fn try_enter(self: &Arc<Self>, ip: IpAddr) -> Option<PreAuthSlot> {
+    pub(crate) fn try_enter(self: &Arc<Self>, ip: IpAddr) -> Option<PreAuthSlot> {
         let mut by_ip = self.0.lock().unwrap();
         if by_ip.values().sum::<usize>() >= MAX_PRE_AUTH || by_ip.get(&ip).copied().unwrap_or(0) >= MAX_PRE_AUTH_PER_IP
         {

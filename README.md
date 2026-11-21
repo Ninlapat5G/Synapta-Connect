@@ -1,4 +1,12 @@
-# Synapta Connect (Phase 0 → v0.0.1: service + อัปเดตอัตโนมัติ)
+# Synapta Connect
+
+<img src="frontend/assets/synapta-connect.png" alt="โลโก้ Synapta Connect" width="128" height="128">
+
+## Panel ปัจจุบัน
+
+เปิดด้วย `synapta-connect.exe panel` หรือเข้า `http://localhost:52402/synaptaconnect` ตามพอร์ตที่ตั้งไว้ หน้า **เครือข่าย** จัดการช่องทาง localhost และ HTTPS บน LAN พร้อมเปลี่ยนพอร์ตเว็บ, Agent API และ discovery ได้
+
+เครื่องปลายทาง Windows x64 ติดตั้งจากไบนารีสำเร็จรูป ส่วนหน้าเว็บและ Agent อัปเดตจากแพ็กเกจที่เซ็นแยกกัน ดูขั้นตอน build, ติดตั้งและเตรียม HTTPS ที่ [คู่มือส่งมอบรุ่น](docs/RELEASE.md)
 
 > ระบบเชื่อมต่ออัจฉริยะระหว่าง **Synapta Code / น้องซิน** และเครื่องปลายทาง (Remote Host) เพื่อวิเคราะห์ทรัพยากร สั่งการเทอร์มินัล ควบคุมหน้าจอ และรับส่งไฟล์ความเร็วสูง ด้วย Rust Core Daemon ประสิทธิภาพสูง รองรับความปลอดภัยระดับ TLS 1.3 / mTLS และ SPAKE2 Zero-Knowledge PAKE
 

@@ -108,7 +108,7 @@ async fn require_client(
 async fn hello(State(app): State<App>) -> Json<Value> {
     Json(json!({
         "device_id": app.node_id, "name": app.config.name, "version": env!("CARGO_PKG_VERSION"),
-        "api_version": 1, "port": app.config.port,
+        "api_version": 1, "port": app.network.state().ports.port,
         "host_pubkey_fingerprint": app.host.fingerprint(),
         "pairing_mode": app.auth.current_otp().is_some(),
     }))

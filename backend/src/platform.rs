@@ -2,21 +2,57 @@
 
 #[cfg(windows)]
 pub(crate) mod win {
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn SetProcessDpiAwarenessContext(value: isize) -> i32;
-    }
+    use std::ffi::c_void;
+
     unsafe extern "system" {
         fn SetConsoleOutputCP(code_page: u32) -> i32;
+        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     }
+
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 
     pub fn init() {
         // กับดักที่เคยเจอจริง: จอ 1920x1080 ที่ตั้ง scale 125% — โปรเซสที่ไม่ประกาศ DPI-aware จะเห็นจอเป็น
         // 1536x864 ตอนจำลองเมาส์ แต่ภาพที่จับได้เป็น 1920x1080 จริง → AI คลิกจุดจากภาพแล้วพลาดไป 25%
-        // ประกาศ per-monitor v2 (-4) ให้ทั้งภาพและเมาส์ใช้ pixel จริงเหมือนกัน
-        unsafe { SetProcessDpiAwarenessContext(-4) };
+        set_dpi_aware();
         // console ใช้ codepage ท้องถิ่น (เช่น 874) ทำให้ภาษาไทยใน OTP/log เพี้ยน — บังคับ UTF-8
         unsafe { SetConsoleOutputCP(65001) };
+    }
+
+    /// ประกาศ per-monitor DPI ให้ทั้งภาพและเมาส์ใช้ pixel จริงเหมือนกัน
+    ///
+    /// กับดัก: ห้ามลิงก์ SetProcessDpiAwarenessContext แบบตรง — ฟังก์ชันนี้มีตั้งแต่ Windows 10 1703
+    /// ถ้าอยู่ใน import table, Windows Server 2016 (1607) จะไม่ยอมเปิด exe เลย ("entry point not found")
+    /// จึงหาแบบ dynamic: v2 (-4) ถ้ามี ไม่งั้นใช้ SetProcessDpiAwareness(2) ของ shcore (per-monitor v1)
+    fn set_dpi_aware() {
+        let user32 = wide("user32.dll");
+        let shcore = wide("shcore.dll");
+        unsafe {
+            let set_context = GetProcAddress(
+                GetModuleHandleW(user32.as_ptr()),
+                c"SetProcessDpiAwarenessContext".as_ptr().cast(),
+            );
+            if !set_context.is_null() {
+                let f: unsafe extern "system" fn(isize) -> i32 = std::mem::transmute(set_context);
+                f(-4);
+                return;
+            }
+            let module = LoadLibraryExW(shcore.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if module.is_null() {
+                return;
+            }
+            let set_awareness = GetProcAddress(module, c"SetProcessDpiAwareness".as_ptr().cast());
+            if !set_awareness.is_null() {
+                let f: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set_awareness);
+                f(2);
+            }
+        }
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
     }
 
     /// เครื่องมือของระบบด้วย path เต็มใน System32 — ไม่พึ่ง PATH/โฟลเดอร์ปัจจุบัน (กัน exe ปลอมชื่อเดียวกันที่ผู้ใช้ทั่วไปวางไว้

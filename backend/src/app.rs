@@ -4,12 +4,13 @@ use crate::{
     auth::{Auth, load_or_create_node_id},
     config::{Config, Mode},
     display::Display,
+    network::Network,
     pairing::Handshakes,
     panel::PanelSessions,
     settings::SettingsStore,
     tls::HostIdentity,
     transfer::Transfers,
-    update::{NoInstaller, UpdateEnv, UpdateManager, manifest, version::Version},
+    update::{NoInstaller, UpdateEnv, UpdateManager, manifest, version::Version, web::WebUpdater},
 };
 use std::{sync::Arc, time::Instant};
 use tokio::sync::Semaphore;
@@ -36,6 +37,8 @@ pub struct AppState {
     /// ตัวส่งงานจับภาพ/input ไปยังที่ที่ทำได้ (ในโปรเซส หรือ helper)
     pub display: Display,
     pub panel: PanelSessions,
+    pub network: Network,
+    pub web_updates: Arc<WebUpdater>,
 }
 
 pub type App = Arc<AppState>;
@@ -77,9 +80,11 @@ impl AppState {
         let local_token = crate::hex::random_id(32);
         std::fs::create_dir_all(&config.data_dir)?;
         let settings = Arc::new(SettingsStore::load(&config.data_dir));
+        let network = Network::load(&config.data_dir, settings.get().network, config.ports())?;
         // เจ้าของเครื่อง (บัญชีที่ติดตั้งระบุไว้) ต้องอ่าน token ได้เพื่อเปิด panel — คนอื่นอ่านไม่ได้
         let readers: Vec<String> = settings.get().owner.into_iter().collect();
         crate::platform::write_private_for(&config.data_dir.join("local_token"), local_token.as_bytes(), &readers)?;
+        let web_updates = Arc::new(WebUpdater::new(&config.data_dir, settings.clone(), update_env.pubkey));
         let updates = Arc::new(UpdateManager::new(
             update_env,
             settings.clone(),
@@ -89,6 +94,8 @@ impl AppState {
             started: Instant::now(),
             display: Display::new(config.mode),
             panel: PanelSessions::load(&config.data_dir),
+            network,
+            web_updates,
             settings,
             updates,
             local_token,

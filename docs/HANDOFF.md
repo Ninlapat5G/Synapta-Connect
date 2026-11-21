@@ -1,8 +1,48 @@
-# Synapta Connect — เอกสารส่งต่องาน v0.3.0
+# Synapta Connect — เอกสารส่งต่องาน v0.3.3
 
 ภาพรวมการออกแบบ: `docs/SERVICE_AND_UPDATE.md` · สัญญา panel: `docs/PANEL_API.md` · การเผยแพร่: `docs/RELEASE.md` · license ส่วนประกอบ: `docs/THIRD_PARTY.md`
 
 ## 1. สถานะ
+
+### รอบ v0.3.3 (2026-11-21) — ผลทดสอบบน Windows Server 2016 จริง + แก้ helper
+
+ติดตั้ง v0.3.2 ด้วยตัวติดตั้งแบบหน้าต่างบนเครื่องปลายทางจริง (app01, Windows Server 2016 Standard build 14393, เข้าผ่าน Radmin VPN)
+แล้วทดสอบจากเครื่อง dev ด้วย client อิสระ (SPAKE2 + mTLS):
+
+| ทดสอบ | ผล |
+|---|---|
+| จับคู่ด้วย OTP, ลายนิ้วมือ host ตรงกับ beacon ของ UDP probe | ผ่าน |
+| service รันบน 14393 (ยืนยันว่าแก้ import ของ DPI แล้ว exe เปิดได้) | ผ่าน |
+| `system.profile`, `exec.run` (cmd/PowerShell 5.1, ภาษาไทยใน stdout) | ผ่าน |
+| `pty.open` ผ่าน WinPTY (cmd และ PowerShell, resize, output, exit code) | ผ่าน |
+| service ตั้ง AUTO_START + รีสตาร์ทเองเมื่อพัง (60 วินาที x3) | ยืนยันด้วย `sc qc` / `sc qfailure` |
+| `screen.*` / `input.*` | ไม่ผ่าน: ไม่มี helper ใน session ของเจ้าของ |
+
+สาเหตุที่ไม่มี helper: Run key เริ่ม helper ตอนล็อกอินเท่านั้น ติดตั้งขณะเจ้าของล็อกอินค้างอยู่จึงไม่มี helper จนล็อกอินรอบหน้า
+v0.3.3 แก้ให้ `synapta-connect panel` (ซึ่งตัวติดตั้งเรียกตอนจบ และรันด้วยบัญชีเจ้าของ) เริ่ม helper ใน session นั้น
+และ helper ใช้ mutex `Local\SynaptaConnectHelper` ให้มีได้ตัวเดียวต่อ session (ตัวที่สองถูก service ปฏิเสธและจะวนต่อใหม่ไม่จบ)
+ยังไม่ได้ยืนยันการจับภาพ/คลิกบนเครื่องจริง — เครื่องที่ลง 0.3.2 แล้ว ให้ล็อกเอาต์/ล็อกอินใหม่ หรือติดตั้ง 0.3.3 ทับ
+
+ข้อสังเกต: `system.profile` รายงาน `privilege.level = administrator` ทั้งที่ service รันด้วย `NT SERVICE\SynaptaConnect` ยังไม่ได้ตรวจว่าแสดงผิดหรือได้สิทธิ์จริง
+
+
+### รอบ v0.3.2 (2026-11-21) — รองรับ Windows Server 2016 + ตัวติดตั้งแบบหน้าต่าง
+
+เครื่องปลายทางจริงเป็น Windows Server 2016 (เทียบเท่า Windows 10 1607) รอบนี้แก้สามเรื่องที่ทำให้ใช้บนเครื่องนั้นไม่ได้
+
+1. **exe เปิดไม่ขึ้นบน Server 2016**: `platform.rs` ลิงก์ `SetProcessDpiAwarenessContext` (มีตั้งแต่ 1703) แบบตรง Windows 1607 จึงไม่ยอมโหลด exe เลย
+   แก้เป็นหาแบบ dynamic และสำรองด้วย `shcore!SetProcessDpiAwareness` ตรวจ import table ของ exe ใหม่ด้วย `dumpbin /imports` แล้วไม่มี API ที่ใหม่กว่า 1607
+2. **Terminal (PTY)**: ConPTY มีตั้งแต่ 1809 จึงเพิ่ม `src/legacy_pty.rs` ใช้ WinPTY เมื่อไม่มี ConPTY ไฟล์ winpty ฝังใน exe แตกลง `<data-dir>\winpty\<hash>\`
+   และเทียบไบต์กับของที่ฝังก่อนโหลดทุกครั้ง เทสต์เรียก WinPTY จริงบนเครื่อง dev (เปิด shell, ปรับขนาด, output, exit code, kill)
+3. **หน้า panel เปิดใน IE แล้วว่าง**: Server 2016 ตั้ง IE เป็นเบราว์เซอร์เริ่มต้น `synapta-connect panel` จึงข้าม IE ไปใช้ Chrome/Edge/Firefox ที่ติดตั้งไว้ ถ้าไม่มีจะบอกให้ติดตั้ง
+
+และย้ายตัวติดตั้งแบบหน้าต่างจากโฟลเดอร์ทดลองของ Codex (`SynaptaCode\lab_connect_installer`) มาไว้ที่ `installer/windows/` ออกแบบใหม่ด้วยโลโก้
+ฟอนต์ Anuphan/Chakra Petch ที่ฝังมา และสีของ panel มีหน้าถอนการติดตั้งเมื่อเครื่องลงไว้แล้ว `scripts/build-release.ps1` สร้างตัวติดตั้งคู่กับ backend ทุกครั้ง
+
+ผลตรวจ: `cargo test` 81 ผ่าน / 2 ข้าม (2 ตัวเดิมที่ต้องมีจอ/multicast) · clippy และ fmt สะอาด · ตัวติดตั้งผ่าน `--verify-payload` และตรวจภาพทั้งสี่หน้าแล้ว
+**ยังไม่ได้รันบน Server 2016 จริง** และยังไม่ได้กดติดตั้งผ่าน UAC (เซสชันนี้ไม่มีสิทธิ์ผู้ดูแล) — ดูรายการทดสอบในข้อ 4.0
+
+### รอบก่อนหน้า
 
 รอบล่าสุดรวมงานหน้า panel และ backend จากทีมเดิม ตรวจโค้ดและทดสอบซ้ำในโหมด console บน Windows แล้ว แก้การติดตั้งซ้ำที่อาจถอนของเดิม การถอนจาก exe ที่ติดตั้ง การตรวจ token ช่วงเริ่มระบบ และสิทธิ์ของโฟลเดอร์ข้อมูลกับ log ของ updater หน้า panel บันทึกค่าตั้งได้เมื่อเว้นแหล่งอัปเดตว่าง
 
@@ -20,9 +60,11 @@ Chrome เปิด panel จากไบนารีบน loopback และ�
 
 | อะไร | ที่ไหน |
 |---|---|
-| exe สำหรับทดสอบล่าสุด | [SynaptaConnect-v0.3.0-20261121-1137.exe](../dist/SynaptaConnect-v0.3.0-20261121-1137.exe) |
-| เครื่องมือผู้เผยแพร่ (keygen/package/verify) | [SynaptaRelease-v0.3.0-20261121-0157.exe](../dist/SynaptaRelease-v0.3.0-20261121-0157.exe) |
-| build จากทีมเดิม | `D:\claude_code\exe\SynaptaConnect-v0.3.0-20261121-0119.exe` |
+| **ตัวติดตั้งสำหรับเครื่องปลายทาง (v0.3.3)** | `D:\claude_code\exe\SynaptaConnectSetup-v0.3.3.exe` (สำเนาใน `dist\release\backend\v0.3.3\`) |
+| agent ตัวเปล่า v0.3.3 (ทางสำรอง/ใช้อัปเดต) | `D:\claude_code\exe\SynaptaConnect-v0.3.3.exe` |
+| ซอร์สตัวติดตั้ง | `installer\windows\` |
+| เครื่องมือผู้เผยแพร่ (keygen/package/verify) | `D:\claude_code\exe\SynaptaRelease-v0.3.3.exe` |
+| เว็บ panel v0.1.2 ที่ build แล้ว | `dist\release\panel\v0.1.2\` |
 | ซอร์ส backend | `D:\claude_code\Synapta Connect\backend\` (`src\winsvc\`, `src\update\`, `src\local.rs`, `src\panel.rs`, `src\display.rs`, `src\helper.rs`, `src\proof.rs`, `src\cli.rs`) |
 | หน้าบ้าน (ฝังเข้า exe ตอน build จาก `frontend\`) | `D:\claude_code\Synapta Connect\frontend\` |
 | สคริปต์ทดสอบที่ต้อง Administrator | `backend\tests\admin\service-lifecycle.ps1` |
@@ -41,6 +83,14 @@ Chrome เปิด panel จากไบนารีบน loopback และ�
 - ขั้น build ของสคริปต์ admin (กุญแจทดสอบ, build 0.3.0/0.3.1, release ดี/ใช้ไม่ได้/ลายเซ็นปลอม) รันผ่านจนถึงก่อนติดตั้ง
 
 ## 4. สิ่งที่ยังต้องตรวจ / ทำต่อ (เรียงตามลำดับ)
+
+0. **ทดสอบบน Windows Server 2016 จริง** (ทำแล้วบางส่วน ดูผลในข้อ 1 รอบ v0.3.3 — ที่เหลือคือจับภาพ/input ผ่าน helper)
+   - ติดตั้ง Chrome หรือ Edge บนเครื่องก่อน (หน้า panel ใช้ IE ไม่ได้)
+   - ดับเบิลคลิก `SynaptaConnectSetup-v0.3.3.exe` ด้วยบัญชีเจ้าของ → UAC → หน้าเสร็จ → panel เปิดเองในเบราว์เซอร์
+   - จับคู่กับ Synapta Code แล้วลอง `terminal.exec` และ **`pty.ws`** (เส้นทาง WinPTY ใน service จริง — เทสต์บนเครื่อง dev รันแบบ console เท่านั้น)
+   - ถ้า PTY ล้ม ดู log ของ service และโฟลเดอร์ `C:\ProgramData\SynaptaConnect\winpty\` ว่ามี `winpty.dll` + `winpty-agent.exe`
+   - ลองจับภาพ/ส่ง input ผ่าน helper, ถอนการติดตั้งจากตัวติดตั้งแล้วลงใหม่
+   - ถ้าเป็น Server Core (ไม่มีหน้า Desktop) ตัวติดตั้งแบบหน้าต่างใช้ไม่ได้ ให้ใช้ `SynaptaConnect-v0.3.3.exe install` แทน
 
 1. **ติดตั้งและถอน Windows Service จริง** — เจ้าของเปิด PowerShell แบบ Administrator แล้วรัน
    `powershell -ExecutionPolicy Bypass -File "D:\claude_code\Synapta Connect\backend\tests\admin\service-lifecycle.ps1"` (~10 นาที; ใช้กุญแจทดสอบ; ปฏิเสธรันถ้ามี service อยู่แล้วหรือพอร์ต 52401/52402 ถูกใช้; ถอนเองตอนจบแม้ล้ม; รายงาน `%TEMP%\synapta-admin-test-<id>\report.txt`). **ส่วนหลังขั้นติดตั้งของสคริปต์ยังไม่เคยรันจริง** — เจอ `[FAIL]` ให้แยกว่าบั๊กระบบหรือบั๊กสคริปต์ (บั๊กสคริปต์เคยเจอแล้ว 1 จุด: PowerShell 5.1 ถือ stderr ของ cargo เป็น error; สคริปต์ต้องเป็น UTF-8 **มี BOM**)

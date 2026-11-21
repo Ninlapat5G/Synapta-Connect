@@ -25,6 +25,25 @@ pub fn start_agent() -> Result<(), String> {
 pub fn stop_agent() -> Result<(), String> {
     host::stop_service(AGENT_SERVICE)
 }
+
+pub fn firewall_ready(data_dir: &Path) -> bool {
+    data_dir.join("updater-status").join(install::FIREWALL_MARKER).is_file()
+}
+
+pub async fn migrate_firewall(data_dir: PathBuf) {
+    for _ in 0..6 {
+        if firewall_ready(&data_dir) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if let Err(error) = tokio::task::spawn_blocking(|| host::start_service(UPDATER_SERVICE))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        {
+            tracing::warn!("เริ่มตัวอัปเดตเพื่อปรับกฎไฟร์วอลล์ไม่ได้: {error}");
+        }
+    }
+}
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -153,6 +172,11 @@ fn updater_main(_args: Vec<OsString>) {
     // ลำดับสำคัญ: กู้งานที่ถูกขัดจังหวะก่อน แล้วค่อยรับคำขอใหม่
     if let Some(r) = installer::recover(&layout, &host, &timing) {
         tracing::warn!(outcome = %r.outcome, version = %r.version, "กู้การอัปเดตที่ถูกขัดจังหวะ");
+    }
+    if !firewall_ready(&layout.data_dir)
+        && let Err(error) = install::configure_firewall(&layout)
+    {
+        tracing::error!("ปรับกฎไฟร์วอลล์ไม่ได้: {error}");
     }
     match manifest::embedded_pubkey() {
         Some(key) => {

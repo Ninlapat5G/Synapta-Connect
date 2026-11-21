@@ -2,7 +2,7 @@
 
 use super::AGENT_SERVICE;
 use crate::{
-    config::{Config, service_data_dir},
+    config::{Ports, panel_port, service_data_dir},
     proof,
     update::installer::{Health, Host},
 };
@@ -89,8 +89,12 @@ impl Host for SystemHost {
         start_service(AGENT_SERVICE)
     }
     fn health(&self) -> Result<Health, String> {
-        http_health(Config::default().local_port)
+        http_health(service_panel_port())
     }
+}
+
+pub fn service_panel_port() -> u16 {
+    panel_port(&service_data_dir()).unwrap_or_else(|| Ports::default().local_port)
 }
 
 /// ถามสุขภาพ agent ผ่าน loopback **พร้อมตรวจว่าคนตอบคือ agent จริง** (ต้องอ่าน local_token ได้ = Administrator/SYSTEM/เจ้าของ)

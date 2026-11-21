@@ -13,6 +13,8 @@ pub mod manifest;
 pub mod source;
 pub mod state;
 pub mod version;
+pub mod web;
+pub mod web_package;
 
 use crate::{auth::now_secs, fsutil, settings::SettingsStore};
 use error::UpdateError;
@@ -179,11 +181,23 @@ impl UpdateManager {
     }
 
     pub fn set_settings(&self, auto_update: bool, source: Option<String>) -> std::io::Result<()> {
+        self.set_sources(auto_update, source, None)
+    }
+
+    pub fn set_sources(
+        &self,
+        auto_update: bool,
+        source: Option<String>,
+        web_source: Option<String>,
+    ) -> std::io::Result<()> {
         self.settings
             .update(|s| {
                 s.update.auto_update = auto_update;
                 if let Some(src) = source {
                     s.update.source = src;
+                }
+                if let Some(src) = web_source {
+                    s.update.web_source = src;
                 }
             })
             .map(|_| ())

@@ -142,11 +142,11 @@ route ที่ต้องมีใบรับรองแต่ไม่ม�
  "memory": {"total_bytes": 0, "available_bytes": 0},
  "disks": [{"name","mount","file_system","total_bytes","available_bytes","removable"}],
  "network": [ … ],
- "privilege": {"level": "standard|administrator|system|root", "user": "…"},
- "agent": {"version": "0.3.0", "pid": 1234},
+ "privilege": {"level": "standard|administrator|system|service|root", "user": "…"},
+ "agent": {"version": "0.3.3", "pid": 1234, "mode": "console|service"},
  "env": {"PATH": "…", "OPENAI_API_KEY": "***"}}
 ```
-`privilege.level` คือสิทธิ์ของโปรเซส agent — Windows: `standard` / `administrator` (elevated) / `system` (service); Unix: `standard` / `root`
+`privilege.level` คือสิทธิ์ของโปรเซส agent — Windows: `standard` / `administrator` (elevated) / `system` / `service` (บัญชีเสมือน `NT SERVICE\SynaptaConnect` สิทธิ์ต่ำ, `user` เป็นชื่อเต็ม); Unix: `standard` / `root` · `agent.mode` = `service` เมื่อรันเป็น Windows service, ไม่งั้น `console`
 **คำสั่งที่รันผ่าน agent ได้สิทธิ์เท่านี้** (OS เป็นตัวกั้น ไม่ใช่ agent กรองคำสั่ง)
 
 #### รันคำสั่ง

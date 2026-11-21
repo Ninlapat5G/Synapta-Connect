@@ -3,6 +3,8 @@
 //!   synapta-release keygen --out DIR
 //!   synapta-release package --exe PATH --version X.Y.Z --key PRIVATE_KEY_FILE --out DIR [--notes TEXT]
 //!   synapta-release verify --dir DIR --pubkey HEX
+//!   synapta-release package-panel --web DIR --version X.Y.Z --key PRIVATE_KEY_FILE --out DIR [--panel-api N] [--notes TEXT]
+//!   synapta-release verify-panel --dir DIR --pubkey HEX
 //!
 //! private key อยู่ในไฟล์เดียว (hex ของ PKCS#8) เก็บนอก repo — ใครถือไฟล์นี้ = ออกอัปเดตให้ทุกเครื่องได้
 
@@ -18,6 +20,7 @@ use synapta_connect::{
     update::{
         manifest::{self, Manifest, PLATFORM, decode_hex, parse_hex32},
         version::Version,
+        web_package::{self, Manifest as PanelManifest},
     },
 };
 
@@ -27,7 +30,9 @@ fn main() {
         Some("keygen") => keygen(&args[1..]),
         Some("package") => package(&args[1..]),
         Some("verify") => verify(&args[1..]),
-        _ => Err("คำสั่ง: keygen | package | verify (ดูหัวไฟล์ src/bin/synapta-release.rs)".into()),
+        Some("package-panel") => package_panel(&args[1..]),
+        Some("verify-panel") => verify_panel(&args[1..]),
+        _ => Err("คำสั่ง: keygen | package | verify | package-panel | verify-panel".into()),
     };
     if let Err(e) = result {
         eprintln!("ผิดพลาด: {e}");
@@ -156,5 +161,63 @@ fn verify(args: &[String]) -> Result<(), String> {
         return Err("ตัวติดตั้งไม่ตรงกับ manifest".into());
     }
     println!("release {} ถูกต้อง (ลายเซ็น, SHA-256, ขนาด)", m.version);
+    Ok(())
+}
+
+fn package_panel(args: &[String]) -> Result<(), String> {
+    let dir = PathBuf::from(flag(args, "--web")?);
+    let out = PathBuf::from(flag(args, "--out")?);
+    let version = flag(args, "--version")?;
+    let parsed = Version::parse(&version).ok_or("--version ต้องเป็นรูป x.y.z")?;
+    if version != parsed.to_string() {
+        return Err("เลขรุ่นต้องใช้รูป x.y.z แบบไม่มีเลขศูนย์นำหน้า".into());
+    }
+    let api = if args.iter().any(|arg| arg == "--panel-api") {
+        flag(args, "--panel-api")?
+            .parse::<u32>()
+            .map_err(|_| "--panel-api ต้องเป็นจำนวนเต็มบวก")?
+    } else {
+        web_package::API
+    };
+    let key = load_key(&flag(args, "--key")?)?;
+    let bytes = web_package::collect(&dir).map_err(|e| format!("{e:#}"))?;
+    let manifest = PanelManifest {
+        asset: PanelManifest::asset_name(&version),
+        version,
+        panel_api: api,
+        sha256: to_hex(&Sha256::digest(&bytes)),
+        size: bytes.len() as u64,
+        notes: flag(args, "--notes").unwrap_or_default(),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
+    let signature = to_hex(key.sign(&manifest_bytes).as_ref());
+    let public = key.public_key().as_ref().try_into().map_err(|_| "public key ยาวผิด")?;
+    PanelManifest::verify(&manifest_bytes, &signature, public).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    for (name, contents) in [
+        (manifest.asset.as_str(), bytes.as_slice()),
+        (web_package::SIGNATURE, signature.as_bytes()),
+        (web_package::MANIFEST, manifest_bytes.as_slice()),
+    ] {
+        synapta_connect::fsutil::atomic_write(&out.join(name), contents).map_err(|e| e.to_string())?;
+    }
+    println!("เว็บรุ่น {} · Panel API {} · {}", manifest.version, api, out.display());
+    Ok(())
+}
+
+fn verify_panel(args: &[String]) -> Result<(), String> {
+    let dir = PathBuf::from(flag(args, "--dir")?);
+    let public = parse_hex32(&flag(args, "--pubkey")?).ok_or("--pubkey ต้องเป็น hex 64 ตัว")?;
+    let limit = manifest::MAX_MANIFEST_BYTES as u64;
+    let bytes = web_package::read_bounded(&dir.join(web_package::MANIFEST), limit).map_err(|e| e.to_string())?;
+    let sig = web_package::read_bounded(&dir.join(web_package::SIGNATURE), 256).map_err(|e| e.to_string())?;
+    let m = PanelManifest::verify(&bytes, std::str::from_utf8(&sig).map_err(|e| e.to_string())?, &public)
+        .map_err(|e| e.to_string())?;
+    let bytes = web_package::read_bounded(&dir.join(&m.asset), m.size).map_err(|e| e.to_string())?;
+    web_package::verify_payload(&m, &bytes).map_err(|e| e.to_string())?;
+    println!(
+        "เว็บรุ่น {} ถูกต้อง (Ed25519, SHA-256, ขนาด และโครงไฟล์) · Panel API {}",
+        m.version, m.panel_api
+    );
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! Interactive terminal (PTY) — ConPTY บน Windows, PTY ปกติบน Unix
+//! Interactive terminal (PTY) — ConPTY บน Windows (WinPTY บนรุ่นที่ไม่มี ConPTY), PTY ปกติบน Unix
 //!
 //! PTY เป็นของ WebSocket connection ที่เปิด: output ส่งกลับเป็น notification
 //! `pty.output` / `pty.exit` และทุก PTY ถูกฆ่าเมื่อ connection ปิดหรือ session ถูก revoke
@@ -6,7 +6,7 @@
 use crate::hex::random_id;
 use crate::rpc::{CONFLICT, Res, RpcError, notification};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -70,22 +70,19 @@ impl Registry {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pair = native_pty_system().openpty(size)?;
-
-        let mut cmd = CommandBuilder::new(p.shell.unwrap_or_else(default_shell));
-        if let Some(cwd) = p.cwd {
-            cmd.cwd(cwd);
-        }
-        cmd.env("TERM", "xterm-256color");
-        let mut child = pair.slave.spawn_command(cmd)?;
-        drop(pair.slave);
+        let shell = p.shell.unwrap_or_else(default_shell);
+        let Started {
+            master,
+            mut reader,
+            writer,
+            mut child,
+        } = start(size, &shell, p.cwd.as_deref())?;
 
         let id = random_id(4);
-        let mut reader = pair.master.try_clone_reader()?;
         let pty = Pty {
-            writer: pair.master.take_writer()?,
+            writer,
             killer: child.clone_killer(),
-            master: pair.master,
+            master,
         };
         self.0.lock().unwrap().insert(id.clone(), pty);
 
@@ -152,6 +149,36 @@ impl Registry {
             let _ = pty.killer.kill();
         }
     }
+}
+
+/// PTY ที่เปิดแล้วพร้อมโปรเซส shell — ConPTY หรือ WinPTY ก็ได้รูปเดียวกัน
+pub(crate) struct Started {
+    pub master: Box<dyn MasterPty + Send>,
+    pub reader: Box<dyn Read + Send>,
+    pub writer: Box<dyn Write + Send>,
+    pub child: Box<dyn Child + Send + Sync>,
+}
+
+fn start(size: PtySize, shell: &str, cwd: Option<&str>) -> Res<Started> {
+    // ConPTY มีตั้งแต่ Windows 10 1809 / Server 2019 — เครื่องเก่ากว่า (เช่น Server 2016) ใช้ WinPTY แทน
+    #[cfg(windows)]
+    if !crate::legacy_pty::has_conpty() {
+        return Ok(crate::legacy_pty::open(size, shell, cwd)?);
+    }
+    let pair = native_pty_system().openpty(size)?;
+    let mut cmd = CommandBuilder::new(shell);
+    if let Some(cwd) = cwd {
+        cmd.cwd(cwd);
+    }
+    cmd.env("TERM", "xterm-256color");
+    let child = pair.slave.spawn_command(cmd)?;
+    drop(pair.slave);
+    Ok(Started {
+        reader: pair.master.try_clone_reader()?,
+        writer: pair.master.take_writer()?,
+        master: pair.master,
+        child,
+    })
 }
 
 fn default_shell() -> String {

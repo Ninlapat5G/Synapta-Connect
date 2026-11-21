@@ -49,7 +49,7 @@ if (-not (Health)) {
 
 $token = (Get-Content -Raw (Join-Path $dir 'local_token')).Trim()
 $code = (Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/v1/local/panel-session" -Headers @{ 'X-Synapta-Local' = $token }).code
-$url = "http://127.0.0.1:$port/panel/#code=$code"
+$url = "http://127.0.0.1:$port/synaptaconnect/#code=$code"
 "panel: $url"
 '(ลิงก์ใช้ได้ครั้งเดียว 60 วินาที; OTP จับคู่ที่ agent เปิดไว้ให้ตอนเริ่มอายุ 120 วินาที — กด "เปิดโหมดจับคู่" ใหม่ได้)'
 if ($Open) { Start-Process $url }

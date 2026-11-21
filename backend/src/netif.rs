@@ -69,6 +69,18 @@ pub fn list() -> Vec<NetIf> {
         .collect()
 }
 
+pub fn local_ipv4_mask(ip: Ipv4Addr) -> Option<Ipv4Addr> {
+    if_addrs::get_if_addrs().ok()?.into_iter().find_map(|interface| {
+        if !interface.is_oper_up() || classify(&interface.name) != "physical" {
+            return None;
+        }
+        match interface.addr {
+            if_addrs::IfAddr::V4(address) if address.ip == ip => Some(address.netmask),
+            _ => None,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::classify;

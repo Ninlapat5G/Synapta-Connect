@@ -1,6 +1,9 @@
 /dist/
 /backend/target/
 /frontend/preview.png
+/frontend/node_modules/
+/frontend/dist/
 /media/*
 !/media/panel-redesign/
 !/media/themes/
+/.codex-attachments/

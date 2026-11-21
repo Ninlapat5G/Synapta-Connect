@@ -1,13 +1,15 @@
 # Synapta Connect — สัญญา API ของ panel (service + auto update)
 
-ใช้คู่กับ `docs/API.md §6` (หน้าจัดการบนเครื่อง) — ทุก endpoint อยู่บน `http://127.0.0.1:52402` เท่านั้น ไม่ออกเครือข่าย
+เว็บเริ่มที่ `/synaptaconnect` พอร์ต panel เริ่มต้นคือ TCP 52402 ใช้ HTTP บน loopback หรือ HTTPS บน LAN เมื่อเจ้าของเปิดช่องทางนั้น API ของ panel อยู่ origin เดียวกับหน้าเว็บ และใช้ session token ที่ผูกกับช่องทางและชื่อ HTTPS ที่ออกให้
 เอกสารออกแบบและเหตุผล: `docs/SERVICE_AND_UPDATE.md`
 
 ## 1. การเปิด panel และยืนยันตัว
 
 panel **ไม่เปิดเอง** — ผู้ใช้สั่ง `synapta-connect.exe panel` (หรือทางลัดที่เรียกคำสั่งนี้) ซึ่งทำ 3 อย่าง:
-อ่าน `local_token` (ไฟล์ที่เฉพาะเจ้าของเครื่อง/Administrators อ่านได้) → ขอรหัสครั้งเดียวจาก agent → เปิดเบราว์เซอร์ที่
-`http://127.0.0.1:52402/panel/#code=<รหัสครั้งเดียว อายุ 60 วินาที>`
+อ่าน `local_token` (ไฟล์ที่เจ้าของเครื่องและ Administrators อ่านได้) → ตรวจ health และขอรหัสครั้งเดียวผ่าน HMAC → เปิดเบราว์เซอร์ที่
+`http://127.0.0.1:52402/synaptaconnect/#code=<รหัสครั้งเดียว อายุ 60 วินาที>`
+
+`synapta-connect.exe panel --lan HOST` พิมพ์ลิงก์ HTTPS สำหรับชื่อหรือ IPv4 ที่อยู่ใน SAN ของใบรับรองและใช้ได้เมื่อเปิดช่องทาง LAN
 
 หน้าเว็บต้องทำ:
 1. อ่าน `code` จาก `location.hash` แล้ว **ลบ hash ทิ้งทันที** (`history.replaceState`)
@@ -18,15 +20,23 @@ panel **ไม่เปิดเอง** — ผู้ใช้สั่ง `syn
    ตอนอัปเดตสำเร็จ/กู้คืน service รีสตาร์ท แต่ token เดิมยังใช้ได้ หน้าเว็บ poll ต่อได้เลยและเห็นผลอัปเดต; ช่วงที่ service ยังไม่กลับมา request จะ fail (เชื่อมต่อไม่ได้) ให้ลองใหม่เงียบ ๆ
    `403` = token หมดอายุ/ไม่รู้จัก (หรือ Host/Origin ผิด) → แสดงข้อความ "เปิด panel ใหม่ด้วยคำสั่ง synapta-connect panel"
 
-กฎที่ agent บังคับ (หน้าบ้านไม่ต้องทำเอง แต่ต้องรู้): request ที่มี `Origin` ต้องเป็น `http://127.0.0.1:52402` หรือ `http://localhost:52402`
-เท่านั้น · ไม่มี CORS · `Host` ต้องเป็น loopback
+หากมี `Origin` ต้องตรงกับ scheme และ `Host` ของคำขอ Agent ตรวจชื่อ HTTPS กับ SAN ของใบรับรองและไม่เปิด CORS เส้นทาง health, helper, การออกรหัสด้วย CLI และการกู้สิทธิ์อยู่บน loopback เท่านั้น
 
-หน้าเว็บถูกเสิร์ฟพร้อม CSP: `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'` —
-**ห้าม inline `<script>`/`onclick=`/`eval`** (ใช้ไฟล์ `.js` ของตัวเอง + `addEventListener`) · ติดต่อได้เฉพาะ origin ตัวเอง
+## เครือข่ายและเว็บอัปเดต
 
-static files ของ panel ถูกฝังในตัวโปรแกรมจากโฟลเดอร์ `frontend/` ตอน build (ยกเว้น `README.md`, `preview.png`, `assets/demo-qr.png`)
-เสิร์ฟที่ `/panel/` — **entry ต้องเป็น `frontend/index.html`** และใช้ path แบบ relative ทั้งหมด (`./app.js`, `./assets/...`)
-ไม่ใช้ CDN/Google Fonts ตอนรัน (panel ต้องทำงานออฟไลน์ และไม่ส่ง request ออกข้างนอกจากหน้าจัดการ)
+| Endpoint | ความหมาย |
+| --- | --- |
+| `GET /api/v1/local/network` | พอร์ตจริงและสถานะ `local_enabled`, `lan_enabled`, `lan_ready`, `lan_hosts` |
+| `PUT /api/v1/local/network` | รับ `port`, `discovery_port`, `local_port`, `local_enabled`, `lan_enabled` จองพอร์ตใหม่ก่อนบันทึก ถ้าย้ายพอร์ตเว็บจะส่ง `code` สำหรับเปิดเว็บบนพอร์ตใหม่เมื่อช่องทางปัจจุบันยังเปิดอยู่ |
+| `POST /api/v1/local/panel-reload` | ออกรหัสครั้งเดียวสำหรับโหลดเว็บรุ่นปัจจุบันด้วยเซสชันที่ยืนยันสิทธิ์แล้ว |
+| `GET /api/v1/local/web-update` | สถานะ ประวัติ และรุ่นเว็บที่แยกจาก Agent |
+| `POST /api/v1/local/web-update/check\|apply\|retry\|rollback` | คืน 202 และทำงานเบื้องหลัง `apply` รับ `{"version":"x.y.z"}` |
+
+`GET /api/v1/local/update` มีฟิลด์ `web` และ `web_source` เพิ่มเติม `PUT /api/v1/local/update/settings` รับ `web_source` แบบไม่บังคับ เว้นว่างเพื่อใช้แหล่งเดียวกับ backend การปิดแต่ละช่องทางบล็อกหน้าเว็บ การแลกรหัส และการใช้ token ของช่องทางนั้น
+
+หน้าเว็บมี CSP แบบ same-origin สำหรับสคริปต์ สไตล์ ฟอนต์และ API พร้อมป้องกันการฝังในเฟรม
+
+ไฟล์สำรองของ panel ฝังมาจาก `frontend/dist/` หลัง Vite build โดยมี `index.html` และ assets ที่เรียกผ่าน `/synaptaconnect/assets/` เมื่อมีอัปเดตเว็บที่ผ่านการตรวจ Agent จะเสิร์ฟแพ็กเกจนั้น ไฟล์เว็บและฟอนต์เสิร์ฟในเครื่อง
 
 ## 2. Endpoint เดิม (ไม่เปลี่ยน)
 
@@ -115,7 +125,7 @@ static files ของ panel ถูกฝังในตัวโปรแกร
 
 ## 6. คำสั่งติดตั้ง (flag ที่ยืนยันแล้ว — ตรงกับ `backend/src/cli.rs`)
 
-`synapta-connect.exe install [--plan] [--json] [--auto-update on|off] [--update-source SRC] [--allow-screen-input] [--owner ชื่อ] [--no-start]`
+`synapta-connect.exe install [--plan] [--json] [--auto-update on|off] [--update-source SRC] [--web-update-source SRC] [--allow-screen-input] [--owner ชื่อ] [--no-start] [--port N] [--discovery-port N] [--local-port N] [--panel-cert PEM --panel-key PEM] [--allow-lan-panel]`
 
 CLI **ตรวจค่าเองทุกครั้ง ไม่เชื่อสิ่งที่หน้าเว็บสร้างให้**: `--update-source` ใช้กฎเดียวกับ `PUT /update/settings` (`github:OWNER/REPO` หรือ `https://…/` ที่เป็น ASCII ที่พิมพ์ได้ ไม่มีช่องว่าง/อัญประกาศ/`<>\^`{|}`;
 CLI ของผู้ดูแลรับ `dir:PATH` เพิ่ม ซึ่ง panel ตั้งไม่ได้) · `--owner` รับเฉพาะตัวอักษร/ตัวเลข `_ . - @ $` ช่องว่าง `\` ไม่เกิน 128 ตัว (ห้าม `: ( ) , ; ' " |` เพราะถูกต่อเป็น `ชื่อ:R` ให้ icacls) ·

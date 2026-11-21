@@ -1,6 +1,42 @@
 //! ค่าตั้งต้นของ agent — อ่านจาก command line เท่านั้น (ไม่มีไฟล์ config)
 
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ports {
+    pub port: u16,
+    pub discovery_port: u16,
+    pub local_port: u16,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Self {
+            port: 52401,
+            discovery_port: 52400,
+            local_port: 52402,
+        }
+    }
+}
+
+impl Ports {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if self.port == 0 || self.discovery_port == 0 || self.local_port == 0 || self.port == self.local_port {
+            return Err("ใช้พอร์ต 1–65535 และกำหนดพอร์ต TCP ของ Agent กับ panel ให้ต่างกัน");
+        }
+        Ok(self)
+    }
+}
+
+pub fn panel_port(data_dir: &Path) -> Option<u16> {
+    std::fs::read_to_string(data_dir.join("panel-port"))
+        .ok()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+}
 
 /// console = เปิดมือในเทอร์มินัล (พฤติกรรม Phase 0 เดิม) · service = รันเป็น Windows service เบื้องหลัง
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +63,14 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn ports(&self) -> Ports {
+        Ports {
+            port: self.port,
+            discovery_port: self.discovery_port,
+            local_port: self.local_port,
+        }
+    }
+
     /// ค่าตั้งของ service: ข้อมูลอยู่ใน %ProgramData%\SynaptaConnect (ใช้ร่วมกับ panel/ตัวติดตั้ง) พอร์ตเป็นค่าเริ่มต้นเสมอ
     pub fn for_service() -> Config {
         Config {
@@ -53,17 +97,19 @@ impl Config {
                 other => return Err(format!("ไม่รู้จักตัวเลือก {other}")),
             }
         }
+        cfg.ports().validate()?;
         Ok(cfg)
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let ports = Ports::default();
         Config {
             mode: Mode::Console,
-            port: 52401,
-            discovery_port: 52400,
-            local_port: 52402,
+            port: ports.port,
+            discovery_port: ports.discovery_port,
+            local_port: ports.local_port,
             data_dir: default_data_dir(),
             name: sysinfo::System::host_name().unwrap_or_else(|_| "unknown-host".into()),
             file_roots: Vec::new(),

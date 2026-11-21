@@ -21,8 +21,10 @@
 
 | รายการ | สถานะ |
 |---|---|
-| หน้าเว็บ panel (`frontend/`) | โค้ดเขียนเองทั้งหมด ไม่มี JS/CSS ของบุคคลที่สามและไม่โหลดอะไรจากอินเทอร์เน็ตตอนรัน (ตรวจ: ไม่มี `import`/URL ภายนอกใน `app.js`) |
+| หน้าเว็บ panel (`frontend/`) | React, React DOM และ Scheduler (MIT), Tailwind CSS (MIT), Lucide (ISC) ไฟล์ทั้งหมดเสิร์ฟจาก Agent สคริปต์ build แนบไลเซนส์ใน `THIRD_PARTY_NOTICES.txt` |
 | ฟอนต์ | [Anuphan](https://fonts.google.com/specimen/Anuphan) และ [Chakra Petch](https://fonts.google.com/specimen/Chakra+Petch) จาก Google Fonts ใช้ SIL Open Font License 1.1 ไฟล์ WOFF2 และไลเซนส์อยู่ใน `frontend/assets/fonts/` และโหลดจาก agent บนเครื่อง |
+| WinPTY (`backend/vendor/winpty/`) | winpty.dll และ winpty-agent.exe รุ่น 0.4.4-dev จาก prebuild ของ node-pty 1.1.0 (MIT, Ryan Prichard) ฝังใน exe และแตกไว้ใน data-dir เมื่อ Windows ไม่มี ConPTY (เช่น Server 2016) สคริปต์ build แนบไลเซนส์ใน `THIRD_PARTY_NOTICES.txt` |
+| ตัวติดตั้งแบบหน้าต่าง (`installer/windows/`) | ฝังฟอนต์ Anuphan (Regular/SemiBold ทำเป็นน้ำหนักคงที่จากไฟล์ variable ของ Google Fonts) และ Chakra Petch SemiBold แบบ TTF (OFL 1.1, ไลเซนส์อยู่ใน `installer/windows/fonts/`) ใช้ .NET Framework ที่มากับ Windows ไม่แจกจ่ายไฟล์ของ Microsoft |
 | Microsoft Visual C++ runtime | build ใช้ CRT แบบ static (`backend/.cargo/config.toml`) — exe ไม่ต้องติดตั้ง VC++ Redistributable และเราไม่ได้แจกจ่ายไฟล์ runtime ของ Microsoft |
 | Windows API (SCM, icacls, netsh, reg, sc, powershell) | เรียกเครื่องมือที่มากับ Windows ตอนติดตั้ง/ถอน ไม่แนบ/ไม่แจกจ่าย |
 | Rust standard library | MIT OR Apache-2.0 (ลิงก์เข้า exe) — รวมในประกาศฉบับเต็มด้วย |

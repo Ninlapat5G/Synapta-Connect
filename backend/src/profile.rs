@@ -17,7 +17,7 @@ pub struct Params {
 
 #[derive(Serialize)]
 pub struct Privilege {
-    /// standard | administrator | system (Windows) / standard | root (Unix)
+    /// standard | administrator | system | service (Windows) / standard | root (Unix)
     pub level: &'static str,
     pub user: String,
 }
@@ -75,7 +75,8 @@ fn collect() -> Res<Value> {
         "disks": disks,
         "network": netif::list(),
         "privilege": privilege()?,
-        "agent": {"version": env!("CARGO_PKG_VERSION"), "pid": std::process::id()},
+        "agent": {"version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(),
+                  "mode": if is_service_account() { "service" } else { "console" }},
     }))
 }
 
@@ -95,7 +96,15 @@ pub fn privilege() -> Res<Privilege> {
         .or_else(|| std::env::var("USERNAME").or_else(|_| std::env::var("USER")).ok())
         .unwrap_or_else(|| "unknown".into());
 
-    // S-1-5-18 คือ SID ของบัญชี SYSTEM บน Windows (เช่น agent ที่ติดตั้งเป็น service)
+    // บัญชีเสมือนของ service (`NT SERVICE\SynaptaConnect`): Windows ให้ token แบบไม่แยก UAC จึงถูกนับว่า
+    // "elevated" ทั้งที่ไม่ใช่ผู้ดูแล — ต้องแยกก่อน ไม่งั้นรายงานเป็น administrator ผิดความจริง (เจอบน Server 2016)
+    if is_service_account() {
+        return Ok(Privilege {
+            level: "service",
+            user: crate::platform::account().unwrap_or(user),
+        });
+    }
+    // S-1-5-18 คือ SID ของบัญชี SYSTEM บน Windows
     let is_system = uid.is_some_and(|u| u.to_string() == "S-1-5-18");
     let level = match (is_system, is_elevated::is_elevated(), cfg!(windows)) {
         (true, _, _) => "system",
@@ -104,6 +113,13 @@ pub fn privilege() -> Res<Privilege> {
         _ => "standard",
     };
     Ok(Privilege { level, user })
+}
+
+/// agent รันด้วยบัญชีเสมือนของ Windows service (`NT SERVICE\...`)
+fn is_service_account() -> bool {
+    static SERVICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SERVICE
+        .get_or_init(|| crate::platform::account().is_some_and(|name| name.to_lowercase().starts_with("nt service\\")))
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //!
 //! ค่าตั้งของ "พอร์ต/โฟลเดอร์" ยังมาจาก command line (config.rs) เหมือนเดิม; ไฟล์นี้มีเฉพาะสิ่งที่ panel แก้ได้
 
-use crate::fsutil;
+use crate::{config::Ports, fsutil};
 use serde::{Deserialize, Serialize};
 use std::{
     io,
@@ -20,6 +20,7 @@ pub struct UpdateSettings {
     pub auto_update: bool,
     /// `github:OWNER/REPO` | `https://…/` | `dir:PATH` (ว่าง = ใช้ค่าที่ฝังตอน build)
     pub source: String,
+    pub web_source: String,
     pub check_interval_hours: u64,
 }
 
@@ -37,6 +38,25 @@ pub struct Settings {
     pub screen_input: ScreenInput,
     /// บัญชี Windows ของเจ้าของเครื่อง (อ่าน local_token ได้, เป็นเจ้าของ helper)
     pub owner: Option<String>,
+    pub network: NetworkSettings,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkSettings {
+    pub ports: Option<Ports>,
+    pub local_enabled: bool,
+    pub lan_enabled: bool,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            ports: None,
+            local_enabled: true,
+            lan_enabled: false,
+        }
+    }
 }
 
 impl Default for UpdateSettings {
@@ -44,6 +64,7 @@ impl Default for UpdateSettings {
         UpdateSettings {
             auto_update: true,
             source: String::new(),
+            web_source: String::new(),
             check_interval_hours: 6,
         }
     }
@@ -55,6 +76,14 @@ impl Settings {
         match self.update.source.trim() {
             "" => DEFAULT_SOURCE.trim().to_string(),
             s => s.to_string(),
+        }
+    }
+
+    pub fn effective_web_source(&self) -> String {
+        if self.update.web_source.trim().is_empty() {
+            self.effective_source()
+        } else {
+            self.update.web_source.trim().to_string()
         }
     }
 }
@@ -83,7 +112,12 @@ impl SettingsStore {
     /// ใส่ค่าตั้งคืนจากไฟล์สำรอง (ตัวติดตั้งกู้รุ่นเดิมแล้วส่งมาให้) — ไฟล์อ่านไม่ออก = ไม่เปลี่ยนอะไร
     pub fn restore_from(&self, backup: &Path) -> io::Result<()> {
         let restored: Settings = fsutil::read_json(backup).ok_or_else(|| io::Error::other("ไฟล์ค่าตั้งสำรองอ่านไม่ได้"))?;
-        self.update(|s| *s = restored).map(|_| ())
+        self.update(|s| {
+            let network = s.network;
+            *s = restored;
+            s.network = network;
+        })
+        .map(|_| ())
     }
 
     /// แก้แล้วบันทึกทันที — บันทึกไม่ได้ = ไม่เปลี่ยนค่าในหน่วยความจำ (กันค่าบนดิสก์กับที่ใช้อยู่ไม่ตรงกัน)

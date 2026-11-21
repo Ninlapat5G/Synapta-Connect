@@ -22,7 +22,7 @@ use synapta_connect::{
     config::{Config, Mode},
     hex::{random_id, to_hex},
     local, proof,
-    update::{Trigger, UpdateEnv, version::Version},
+    update::{Trigger, UpdateEnv, version::Version, web_package},
 };
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
@@ -142,9 +142,13 @@ impl Svc {
             .unwrap();
     }
     async fn wait_state(&self, token: &str, want: &str) -> Value {
+        self.wait_state_at("/api/v1/local/update", token, want).await
+    }
+
+    async fn wait_state_at(&self, path: &str, token: &str, want: &str) -> Value {
         for _ in 0..100 {
             let s: Value = self
-                .req(reqwest::Method::GET, "/api/v1/local/update", Some(token))
+                .req(reqwest::Method::GET, path, Some(token))
                 .send()
                 .await
                 .unwrap()
@@ -158,6 +162,67 @@ impl Svc {
         }
         panic!("state ไม่เป็น {want}");
     }
+}
+
+#[tokio::test]
+async fn signed_vite_build_updates_and_rolls_back_over_panel_http() {
+    let s = start(Mode::Service).await;
+    let token = s.panel_token().await;
+    let source = s.dir.join("web-release");
+    std::fs::create_dir(&source).unwrap();
+    let version = "99.0.0";
+    let bytes = web_package::collect(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../frontend/dist")).unwrap();
+    let asset = web_package::Manifest::asset_name(version);
+    let manifest = serde_json::to_vec(&json!({
+        "version": version, "panel_api": web_package::API, "asset": asset,
+        "sha256": to_hex(&Sha256::digest(&bytes)), "size": bytes.len()
+    }))
+    .unwrap();
+    std::fs::write(source.join(web_package::MANIFEST), &manifest).unwrap();
+    std::fs::write(
+        source.join(web_package::SIGNATURE),
+        to_hex(s.key.sign(&manifest).as_ref()),
+    )
+    .unwrap();
+    std::fs::write(source.join(&asset), bytes).unwrap();
+    s.app
+        .settings
+        .update(|settings| settings.update.web_source = format!("dir:{}", source.display()))
+        .unwrap();
+
+    let endpoint = "/api/v1/local/web-update";
+    let post = |action| s.req(reqwest::Method::POST, &format!("{endpoint}/{action}"), Some(&token));
+    assert_eq!(post("check").send().await.unwrap().status(), 202);
+    let available = s.wait_state_at(endpoint, &token, "update_available").await;
+    assert_eq!(available["available"]["version"], version);
+    assert_eq!(
+        post("apply")
+            .json(&json!({ "version": version }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        202
+    );
+    assert_eq!(
+        s.wait_state_at(endpoint, &token, "up_to_date").await["current_version"],
+        version
+    );
+    assert_eq!(s.calls.0.load(Ordering::SeqCst), 0, "the binary installer stays idle");
+    let index = s
+        .req(reqwest::Method::GET, "/synaptaconnect", None)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(index.contains("/synaptaconnect/assets/"));
+    assert_eq!(post("rollback").send().await.unwrap().status(), 202);
+    assert_eq!(
+        s.wait_state_at(endpoint, &token, "rolled_back").await["current_version"],
+        web_package::BASELINE
+    );
 }
 
 #[tokio::test]

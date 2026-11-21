@@ -5,7 +5,7 @@
 //! ตัวตนของ helper = สิทธิ์อ่านไฟล์ token (ACL) ไม่ใช่สิ่งที่ helper อ้างเอง; รับเฉพาะ method จับภาพ/input (display.rs)
 
 use crate::{
-    config::{Config, service_data_dir},
+    config::{Ports, panel_port, service_data_dir},
     display::{self, HelperInfo},
     proof,
     rpc::RpcError,
@@ -21,8 +21,12 @@ const RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// รันจนกว่าจะอ่าน token ไม่ได้ (ไม่ใช่เจ้าของ / ถอนการติดตั้งแล้ว)
 pub async fn run() -> anyhow::Result<()> {
-    let token_file = service_data_dir().join("local_token");
-    let port = Config::default().local_port;
+    #[cfg(windows)]
+    if !claim_session() {
+        return Ok(()); // มี helper ใน session นี้อยู่แล้ว
+    }
+    let data_dir = service_data_dir();
+    let token_file = data_dir.join("local_token");
     let mut wait = RETRY_MIN;
     loop {
         // อ่านใหม่ทุกรอบ: service สุ่ม token ใหม่ทุกครั้งที่เริ่ม
@@ -33,6 +37,7 @@ pub async fn run() -> anyhow::Result<()> {
             tokio::time::sleep(RETRY_MIN).await;
             continue;
         }
+        let port = panel_port(&data_dir).unwrap_or_else(|| Ports::default().local_port);
         match session(port, token.trim()).await {
             Ok(()) => wait = RETRY_MIN, // เคยต่อได้แล้วหลุด (service รีสตาร์ท) ลองใหม่ถี่ ๆ
             Err(e) => {
@@ -110,6 +115,50 @@ async fn handle(text: &str) -> String {
         Err(e) => json!({"id": id, "error": e}),
     }
     .to_string()
+}
+
+/// helper ได้ทีละตัวต่อ session — service ปฏิเสธตัวที่สอง ซึ่งจะวนต่อใหม่ไปเรื่อย ๆ จึงเลิกตั้งแต่ต้น
+/// (mutex ใน namespace `Local\` แยกตาม session; handle ไม่ปิด ถือไว้จนโปรเซสจบ)
+#[cfg(windows)]
+fn claim_session() -> bool {
+    use windows::{
+        Win32::{
+            Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+            System::Threading::CreateMutexW,
+        },
+        core::w,
+    };
+    match unsafe { CreateMutexW(None, false, w!("Local\\SynaptaConnectHelper")) } {
+        Ok(_) => {
+            let error = unsafe { GetLastError() };
+            error != ERROR_ALREADY_EXISTS
+        }
+        Err(_) => true, // สร้าง mutex ไม่ได้ก็ยังทำงานได้ — แย่สุดคือมีตัวสำรองรออยู่
+    }
+}
+
+/// เริ่ม helper ของ service ใน session นี้ (ตัวที่ติดตั้งไว้ใน Program Files) — มีอยู่แล้วตัวใหม่จะเลิกเอง
+///
+/// Run key เริ่ม helper ตอนล็อกอินเท่านั้น ถ้าติดตั้งขณะเจ้าของล็อกอินค้างอยู่ จะไม่มี helper จนล็อกอินรอบหน้า
+/// `panel` ซึ่งรันด้วยบัญชีเจ้าของใน session นั้นอยู่แล้วจึงเรียกตัวนี้แทน
+#[cfg(windows)]
+pub fn start_in_this_session() {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let exe = crate::winsvc::install::install_dir().join(crate::update::installer::EXE_NAME);
+    if !exe.is_file() {
+        return;
+    }
+    // กับดัก: stdio ต้องเป็น null — ถ้าสืบทอด pipe ของผู้เรียก (เช่นตัวติดตั้งที่อ่าน output ของ `panel` จนจบ)
+    // helper ที่อยู่ยาวจะถือ pipe ไว้ ทำให้ผู้เรียกรอไม่มีวันจบ
+    let _ = std::process::Command::new(exe)
+        .arg("helper")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn();
 }
 
 #[cfg(windows)]

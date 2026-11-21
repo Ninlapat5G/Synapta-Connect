@@ -6,7 +6,7 @@
 
 use crate::{auth::now_secs, hex::random_id};
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -21,17 +21,22 @@ const MAX_ENTRIES: usize = 16;
 
 /// หน้าเว็บของ panel = โฟลเดอร์ frontend/ ตอน build (entry: index.html) ยกเว้นไฟล์ที่ไม่ใช่ของหน้าเว็บ
 #[derive(RustEmbed)]
-#[folder = "../frontend/"]
-#[exclude = "README.md"]
-#[exclude = "preview.png"]
-#[exclude = "assets/demo-qr.png"]
+#[folder = "../frontend/dist/"]
 struct Assets;
+
+pub const PATH: &str = "/synaptaconnect/";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Local,
+    Lan(String),
+}
 
 /// token เก็บเป็น SHA-256 (ไม่เก็บตัวจริง) และรอดการรีสตาร์ทของ agent จนถึงเวลาหมดอายุ — ตอนอัปเดต service ต้องรีสตาร์ท
 /// ถ้า token หายตามไปผู้ใช้จะไม่เห็นผลอัปเดต (สำเร็จ/กู้คืน) เลย; รหัสครั้งเดียว (60 วิ) ไม่เก็บลงดิสก์
 #[derive(Default)]
 pub struct PanelSessions {
-    codes: Mutex<HashMap<String, u64>>,
+    codes: Mutex<HashMap<String, (u64, Scope)>>,
     /// hash ของ token → เวลาหมดอายุ
     tokens: Mutex<HashMap<String, u64>>,
     /// ที่เก็บ hash (None = ไม่เก็บ ใช้ในเทสต์)
@@ -40,6 +45,13 @@ pub struct PanelSessions {
 
 fn hash(token: &str) -> String {
     crate::hex::to_hex(&sha2::Sha256::digest(token.as_bytes()))
+}
+
+fn token_hash(token: &str, scope: &Scope) -> String {
+    match scope {
+        Scope::Local => hash(token),
+        Scope::Lan(host) => hash(&format!("lan:{host}\0{token}")),
+    }
 }
 
 /// ลบที่หมดอายุ แล้วถ้ายังล้นให้ตัดตัวที่ใกล้หมดอายุที่สุด
@@ -79,55 +91,82 @@ impl PanelSessions {
 
     /// รหัสครั้งเดียว อายุ 60 วินาที
     pub fn issue_code(&self) -> String {
+        self.issue_for(Scope::Local)
+    }
+
+    pub fn issue_for(&self, scope: Scope) -> String {
         let mut codes = self.codes.lock().unwrap();
-        prune(&mut codes);
+        codes.retain(|_, (expires, _)| *expires > now_secs());
+        if codes.len() >= MAX_ENTRIES
+            && let Some(oldest) = codes
+                .iter()
+                .min_by_key(|(_, (exp, _))| *exp)
+                .map(|(key, _)| key.clone())
+        {
+            codes.remove(&oldest);
+        }
         let code = random_id(16);
-        codes.insert(code.clone(), now_secs() + CODE_TTL_SECS);
+        codes.insert(code.clone(), (now_secs() + CODE_TTL_SECS, scope));
         code
     }
 
     /// แลกรหัส → (token, หมดอายุเมื่อ) — รหัสถูกใช้แล้วหมดทันทีไม่ว่าสำเร็จหรือไม่
     pub fn exchange(&self, code: &str) -> Option<(String, u64)> {
-        let expires = self.codes.lock().unwrap().remove(code)?;
-        if expires <= now_secs() {
+        self.exchange_for(code, &Scope::Local)
+    }
+
+    pub fn exchange_for(&self, code: &str, scope: &Scope) -> Option<(String, u64)> {
+        let mut codes = self.codes.lock().unwrap();
+        let (expires, issued_for) = codes.get(code)?;
+        if expires <= &now_secs() || issued_for != scope {
             return None;
         }
+        codes.remove(code);
         let mut tokens = self.tokens.lock().unwrap();
         prune(&mut tokens);
         let (token, until) = (random_id(32), now_secs() + TOKEN_TTL_SECS);
-        tokens.insert(hash(&token), until);
+        tokens.insert(token_hash(&token, scope), until);
         self.save(&tokens);
         Some((token, until))
     }
 
     pub fn is_valid(&self, token: &str) -> bool {
+        self.valid_for(token, &Scope::Local)
+    }
+
+    pub fn valid_for(&self, token: &str, scope: &Scope) -> bool {
         self.tokens
             .lock()
             .unwrap()
-            .get(&hash(token))
+            .get(&token_hash(token, scope))
             .is_some_and(|exp| *exp > now_secs())
     }
 }
 
-pub async fn index() -> Response {
-    serve_file("index.html")
+pub async fn index(State(app): State<crate::app::App>) -> Response {
+    serve_file(&app, "index.html")
 }
 
-pub async fn file(Path(path): Path<String>) -> Response {
-    serve_file(&path)
+pub async fn file(State(app): State<crate::app::App>, Path(path): Path<String>) -> Response {
+    serve_file(&app, &path)
 }
 
-fn serve_file(path: &str) -> Response {
-    let Some(asset) = Assets::get(path) else {
+fn serve_file(app: &crate::app::App, path: &str) -> Response {
+    let file = app
+        .web_updates
+        .file(path)
+        .map(|(mime, bytes)| (mime.to_owned(), bytes))
+        .or_else(|| Assets::get(path).map(|asset| (asset.metadata.mimetype().to_string(), asset.data.into_owned())));
+    let Some((mime, bytes)) = file else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // หน้าเว็บคุยได้เฉพาะ origin ตัวเอง และห้ามฝังใน frame — กัน XSS/clickjacking บนหน้าที่ถือ token
     (
         [
-            (header::CONTENT_TYPE, asset.metadata.mimetype().to_string()),
+            (header::CONTENT_TYPE, mime),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+                "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                  font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
                     .into(),
             ),
@@ -135,7 +174,7 @@ fn serve_file(path: &str) -> Response {
             (header::CACHE_CONTROL, "no-store".into()),
             (header::REFERRER_POLICY, "no-referrer".into()),
         ],
-        asset.data.into_owned(),
+        bytes,
     )
         .into_response()
 }
@@ -159,7 +198,10 @@ mod tests {
     fn expired_code_and_token_are_rejected_and_sessions_are_capped() {
         let s = PanelSessions::default();
         let code = s.issue_code();
-        s.codes.lock().unwrap().insert(code.clone(), now_secs() - 1);
+        s.codes
+            .lock()
+            .unwrap()
+            .insert(code.clone(), (now_secs() - 1, Scope::Local));
         assert!(s.exchange(&code).is_none());
 
         let (token, _) = s.exchange(&s.issue_code()).unwrap();

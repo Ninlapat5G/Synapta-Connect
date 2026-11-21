@@ -11,7 +11,7 @@ use crate::{app::App, netif};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, time::Duration};
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, task::JoinHandle};
 
 const SERVICE_TYPE: &str = "_synapta-connect._tcp.local.";
 const PROBE_MAGIC: &str = "synapta-connect";
@@ -19,7 +19,9 @@ const BEACON_INTERVAL: Duration = Duration::from_secs(3);
 
 /// ต้องถือไว้ตลอดอายุโปรแกรม — ทิ้งเมื่อไหร่ mDNS หยุดประกาศ
 pub struct Discovery {
-    _mdns: Option<ServiceDaemon>,
+    mdns: Option<ServiceDaemon>,
+    probe: Option<JoinHandle<()>>,
+    broadcast: JoinHandle<()>,
 }
 
 fn beacon(app: &App) -> Value {
@@ -27,22 +29,55 @@ fn beacon(app: &App) -> Value {
         "protocol": "synapta-connect/v1",
         "device_id": app.node_id,
         "host_pubkey_fingerprint": app.host.fingerprint(),
-        "port": app.config.port,
+        "port": app.network.state().ports.port,
         "pairing_mode": app.auth.current_otp().is_some(),
     })
 }
 
 /// เริ่มประกาศตัวเอง; ล้มเหลวส่วนไหนก็แค่ log (agent ยังต่อด้วย IP ตรงได้)
 pub async fn start(app: &App) -> Discovery {
+    let port = app.network.state().ports.discovery_port;
+    let socket = crate::network::bind_discovery(port)
+        .await
+        .inspect_err(|e| tracing::warn!("เปิด UDP {port} ไม่ได้: {e}"))
+        .ok();
+    start_with_socket(app, socket)
+}
+
+pub(crate) fn start_with_socket(app: &App, socket: Option<UdpSocket>) -> Discovery {
     let mdns = start_mdns(app).inspect_err(|e| tracing::warn!("mDNS ใช้ไม่ได้: {e}")).ok();
-    match UdpSocket::bind(("0.0.0.0", app.config.discovery_port)).await {
-        Ok(sock) => {
-            tokio::spawn(answer_probes(sock, app.clone()));
-        }
-        Err(e) => tracing::warn!("เปิด UDP {} ไม่ได้ (probe ใช้ไม่ได้): {e}", app.config.discovery_port),
+    Discovery {
+        mdns,
+        probe: socket.map(|sock| tokio::spawn(answer_probes(sock, app.clone()))),
+        broadcast: tokio::spawn(broadcast_beacons(app.clone())),
     }
-    tokio::spawn(broadcast_beacons(app.clone()));
-    Discovery { _mdns: mdns }
+}
+
+impl Discovery {
+    pub fn set_probe(&mut self, app: &App, socket: UdpSocket) {
+        if let Some(old) = self.probe.replace(tokio::spawn(answer_probes(socket, app.clone()))) {
+            old.abort();
+        }
+    }
+
+    pub fn refresh_mdns(&mut self, app: &App) {
+        if let Some(previous) = self.mdns.take() {
+            let _ = previous.shutdown();
+        }
+        self.mdns = start_mdns(app).inspect_err(|e| tracing::warn!("mDNS ใช้ไม่ได้: {e}")).ok();
+    }
+}
+
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        if let Some(daemon) = &self.mdns {
+            let _ = daemon.shutdown();
+        }
+        if let Some(probe) = &self.probe {
+            probe.abort();
+        }
+        self.broadcast.abort();
+    }
 }
 
 fn start_mdns(app: &App) -> Result<ServiceDaemon, mdns_sd::Error> {
@@ -65,7 +100,7 @@ fn start_mdns(app: &App) -> Result<ServiceDaemon, mdns_sd::Error> {
         &app.node_id,
         &format!("{}.local.", app.node_id),
         "",
-        app.config.port,
+        app.network.state().ports.port,
         &props[..],
     )?
     .enable_addr_auto();
@@ -93,6 +128,7 @@ async fn broadcast_beacons(app: App) {
     loop {
         tick.tick().await;
         let payload = beacon(&app).to_string();
+        let port = app.network.state().ports.discovery_port;
         for iface in netif::list().into_iter().filter(|i| i.kind == "physical") {
             let (std::net::IpAddr::V4(ip), Some(bcast)) = (iface.ip, iface.broadcast) else {
                 continue;
@@ -102,9 +138,7 @@ async fn broadcast_beacons(app: App) {
                 continue;
             };
             if sock.set_broadcast(true).is_ok() {
-                let _ = sock
-                    .send_to(payload.as_bytes(), (bcast, app.config.discovery_port))
-                    .await;
+                let _ = sock.send_to(payload.as_bytes(), (bcast, port)).await;
             }
         }
     }

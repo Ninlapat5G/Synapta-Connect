@@ -15,11 +15,15 @@ pub mod hex;
 pub mod http;
 pub mod input;
 pub mod kill_tree;
+#[cfg(windows)]
+mod legacy_pty;
 pub mod local;
 pub mod netif;
+pub mod network;
 pub mod open_panel;
 pub mod pairing;
 pub mod panel;
+pub mod panel_https;
 pub mod platform;
 pub mod profile;
 pub mod proof;
@@ -47,9 +51,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 /// รัน agent จนกว่า `shutdown` จะเสร็จ (service ใช้สัญญาณหยุดจาก SCM)
 pub async fn run_until(config: Config, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
     let app = app::AppState::new(config)?;
-    let tls_listener = tokio::net::TcpListener::bind(("0.0.0.0", app.config.port)).await?;
-    let local_listener = tokio::net::TcpListener::bind(("127.0.0.1", app.config.local_port)).await?;
-    let _discovery = discovery::start(&app).await;
+    #[cfg(windows)]
+    legacy_pty::set_data_dir(&app.config.data_dir);
+    let listeners = network::Listeners::start(&app).await?;
 
     match app.config.mode {
         Mode::Console => announce_console(&app),
@@ -58,17 +62,14 @@ pub async fn run_until(config: Config, shutdown: impl Future<Output = ()>) -> an
             tracing::info!(version = env!("CARGO_PKG_VERSION"), host_key = %app.host.fingerprint(), "service เริ่มทำงาน");
             app.updates.ingest_result(); // ผลของการอัปเดตที่เพิ่งจบ (รวมกรณีเพิ่งถูกกู้คืน)
             tokio::spawn(app.updates.clone().run_scheduler());
+            tokio::spawn(app.web_updates.clone().run_scheduler());
+            #[cfg(windows)]
+            tokio::spawn(winsvc::migrate_firewall(app.config.data_dir.clone()));
         }
     }
 
-    let local = axum::serve(
-        local_listener,
-        local::router(app.clone()).into_make_service_with_connect_info::<SocketAddr>(),
-    );
-    let tls_config = tls::server_config(&app)?;
     tokio::select! {
-        r = local => r?,
-        _ = tls::serve(tls_listener, tls_config, http::router(app.clone()), app) => {}
+        _ = listeners.supervise(app) => {}
         _ = shutdown => {}
     }
     Ok(())
@@ -82,15 +83,14 @@ fn announce_console(app: &app::App) {
     for i in netif::list() {
         println!(
             "  https://{}  [{} / {}]",
-            SocketAddr::new(i.ip, app.config.port),
+            SocketAddr::new(i.ip, app.network.state().ports.port),
             i.name,
             i.kind
         );
     }
     println!(
-        "  หน้าจัดการบนเครื่องนี้: http://127.0.0.1:{}/api/v1/local/status  (แนบ header X-Synapta-Local = ข้อความใน {})",
-        app.config.local_port,
-        app.config.data_dir.join("local_token").display()
+        "  หน้าจัดการบนเครื่องนี้: http://127.0.0.1:{}/synaptaconnect  (เปิดด้วย synapta-connect panel)",
+        app.network.state().ports.local_port,
     );
     println!("  OTP สำหรับจับคู่: {}  (หมดอายุใน 2 นาที)", otp.otp);
 }

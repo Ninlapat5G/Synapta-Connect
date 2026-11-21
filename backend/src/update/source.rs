@@ -7,6 +7,7 @@ use super::{error::UpdateError, manifest::MAX_MANIFEST_BYTES};
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -96,13 +97,16 @@ impl Source {
         match self {
             Source::Dir(dir) => {
                 let from = dir.join(name);
-                let len = std::fs::metadata(&from)
-                    .map_err(|e| fail(format!("ไม่พบ {name}: {e}")))?
-                    .len();
-                if len > max_bytes {
+                let source = std::fs::File::open(&from).map_err(|e| fail(format!("ไม่พบ {name}: {e}")))?;
+                if source.metadata().map_err(|e| fail(e.to_string()))?.len() > max_bytes {
                     return Err(fail("ไฟล์ใหญ่เกินกำหนด".into()));
                 }
-                std::fs::copy(&from, dest).map_err(|e| fail(format!("คัดลอกไม่ได้: {e}")))?;
+                let mut target = std::fs::File::create(dest).map_err(|e| fail(e.to_string()))?;
+                let size = std::io::copy(&mut source.take(max_bytes.saturating_add(1)), &mut target)
+                    .map_err(|e| fail(format!("คัดลอกไม่ได้: {e}")))?;
+                if size > max_bytes {
+                    return Err(fail("ไฟล์ใหญ่เกินกำหนด".into()));
+                }
                 Ok(())
             }
             _ => {
@@ -135,11 +139,13 @@ impl Source {
         }
     }
 
-    async fn fetch_small(&self, name: &str) -> Result<Vec<u8>, UpdateError> {
+    pub async fn fetch_small(&self, name: &str) -> Result<Vec<u8>, UpdateError> {
         if let Source::Dir(dir) = self {
             let path = dir.join(name);
-            let bytes =
-                std::fs::read(&path).map_err(|e| unreachable("check", format!("อ่าน {} ไม่ได้: {e}", path.display())))?;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)
+                .and_then(|file| file.take(MAX_MANIFEST_BYTES as u64 + 1).read_to_end(&mut bytes))
+                .map_err(|e| unreachable("check", format!("อ่าน {} ไม่ได้: {e}", path.display())))?;
             return if bytes.len() > MAX_MANIFEST_BYTES {
                 Err(UpdateError::new("check", "manifest_invalid", "ไฟล์ใหญ่ผิดปกติ"))
             } else {

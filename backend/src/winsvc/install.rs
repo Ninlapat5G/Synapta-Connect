@@ -8,7 +8,8 @@
 use super::{AGENT_ACCOUNT, AGENT_SERVICE, UPDATER_SERVICE, host, http_health};
 use crate::{
     cli::InstallOptions,
-    config::{Config, service_data_dir},
+    config::service_data_dir,
+    panel_https,
     settings::SettingsStore,
     update::{
         installer::{self, EXE_NAME},
@@ -38,9 +39,10 @@ const FIREWALL_TCP: &str = "Synapta Connect (API)";
 const FIREWALL_UDP: &str = "Synapta Connect (Discovery)";
 const RUN_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "SynaptaConnectHelper";
+pub(super) const FIREWALL_MARKER: &str = "service-firewall-v2";
 
 /// ที่ติดตั้งโปรแกรม — %ProgramFiles%\SynaptaConnect
-fn install_dir() -> PathBuf {
+pub fn install_dir() -> PathBuf {
     std::env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
@@ -73,7 +75,13 @@ pub fn plan(opts: &InstallOptions) -> Vec<(&'static str, String)> {
         ),
         (
             "firewall",
-            "เปิดพอร์ต TCP 52401 / UDP 52400 เฉพาะเครือข่าย private และ domain".into(),
+            format!(
+                "อนุญาต SynaptaConnect บน private/domain: Agent TCP {}, discovery UDP {}, panel TCP {} (LAN {})",
+                opts.ports.port,
+                opts.ports.discovery_port,
+                opts.ports.local_port,
+                on_off(opts.allow_lan_panel)
+            ),
         ),
         (
             "helper_autostart",
@@ -256,10 +264,24 @@ fn do_install(opts: &InstallOptions, out: &Out, dir: &Path) -> Result<String, St
                 "ให้เจ้าของ '{}' อ่าน local_token ไม่ได้ (ชื่อบัญชีถูกต้องไหม? ใช้ --owner ชื่อเครื่อง\\ผู้ใช้): {e}",
                 opts.owner
             )
-        })
+        })?;
+        let port_file = data.join("panel-port");
+        std::fs::write(&port_file, opts.ports.local_port.to_string()).map_err(|e| e.to_string())?;
+        grant(
+            &port_file,
+            &[&agent_full, "*S-1-5-18:F", "*S-1-5-32-544:F", &owner_read],
+        )
     })?;
 
     step(out, "settings", || {
+        if let Some((cert, key)) = &opts.panel_tls {
+            panel_https::Server::from_files(cert, key).map_err(|e| format!("ใบรับรอง panel: {e:#}"))?;
+            for (source, name) in [(cert, panel_https::CERT_FILE), (key, panel_https::KEY_FILE)] {
+                let destination = data.join(name);
+                let bytes = std::fs::read(source).map_err(|e| e.to_string())?;
+                crate::fsutil::atomic_write(&destination, &bytes).map_err(|e| e.to_string())?;
+            }
+        }
         installer::write_install_info(&layout_for(dir, &data, &work), &Version::current().to_string())
             .map_err(|e| e.to_string())?;
         SettingsStore::load(&data)
@@ -267,34 +289,16 @@ fn do_install(opts: &InstallOptions, out: &Out, dir: &Path) -> Result<String, St
                 s.owner = Some(opts.owner.clone());
                 s.update.auto_update = opts.auto_update;
                 s.update.source = opts.update_source.clone();
+                s.update.web_source = opts.web_update_source.clone();
                 s.screen_input.enabled = opts.allow_screen_input;
+                s.network.ports = Some(opts.ports);
+                s.network.lan_enabled = opts.allow_lan_panel;
             })
             .map(|_| ())
             .map_err(|e| e.to_string())
     })?;
 
-    step(out, "firewall", || {
-        let program = format!("program={}", exe.display());
-        for (name, proto, port) in [(FIREWALL_TCP, "TCP", "52401"), (FIREWALL_UDP, "UDP", "52400")] {
-            run_tool(
-                "netsh.exe",
-                &[
-                    "advfirewall",
-                    "firewall",
-                    "add",
-                    "rule",
-                    &format!("name={name}"),
-                    "dir=in",
-                    "action=allow",
-                    &program,
-                    &format!("protocol={proto}"),
-                    &format!("localport={port}"),
-                    "profile=private,domain",
-                ],
-            )?;
-        }
-        Ok(())
-    })?;
+    step(out, "firewall", || configure_firewall(&layout_for(dir, &data, &work)))?;
 
     step(out, "helper_autostart", || {
         let command = format!("\"{}\" helper", exe.display());
@@ -336,10 +340,46 @@ fn layout_for(install: &Path, data: &Path, work: &Path) -> installer::Layout {
     }
 }
 
+pub(super) fn configure_firewall(layout: &installer::Layout) -> Result<(), String> {
+    let program = format!("program={}", layout.exe().display());
+    let service = format!("service={AGENT_SERVICE}");
+    for (name, proto) in [(FIREWALL_TCP, "TCP"), (FIREWALL_UDP, "UDP")] {
+        let name = format!("name={name}");
+        let protocol = format!("protocol={proto}");
+        let options = [&*service, "localport=any", "profile=private,domain", "action=allow"];
+        let mut change = vec![
+            "advfirewall",
+            "firewall",
+            "set",
+            "rule",
+            &*name,
+            "dir=in",
+            &*program,
+            "new",
+        ];
+        change.extend(options);
+        if run_tool("netsh.exe", &change).is_err() {
+            let mut add = vec![
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &*name,
+                "dir=in",
+                &*program,
+                &*protocol,
+            ];
+            add.extend(options);
+            run_tool("netsh.exe", &add)?;
+        }
+    }
+    crate::fsutil::atomic_write(&layout.status_dir().join(FIREWALL_MARKER), b"2").map_err(|e| e.to_string())
+}
+
 fn wait_healthy(timeout: Duration) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        match http_health(Config::default().local_port) {
+        match http_health(host::service_panel_port()) {
             Ok(h) => return Ok(json!(h)),
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!("service ไม่ตอบ health ภายใน {} วินาที: {e}", timeout.as_secs()));
@@ -506,7 +546,7 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
     run("data", &mut || {
         if keep_data {
             // เก็บอุปกรณ์ที่จับคู่/กุญแจ host ไว้ใช้ตอนติดตั้งใหม่ — ลบเฉพาะความลับชั่วคราวและงานค้าง
-            for name in ["local_token", "panel_sessions.json"] {
+            for name in ["local_token", "panel_sessions.json", "panel-port"] {
                 let _ = std::fs::remove_file(data.join(name));
             }
             for name in ["staging", "updater", "updater-status"] {
@@ -558,7 +598,7 @@ pub fn status(json: bool) -> i32 {
     };
     let (dir, data) = (install_dir(), service_data_dir());
     let layout = layout_for(&dir, &data, &data.join("updater"));
-    let health = http_health(Config::default().local_port);
+    let health = http_health(host::service_panel_port());
     let report = json!({
         "agent": state_of(AGENT_SERVICE),
         "updater": state_of(UPDATER_SERVICE),

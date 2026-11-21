@@ -2,6 +2,7 @@
 //! ไฟล์นี้แค่แปลง argv เป็น `Command` — ตัวทำงานจริงอยู่ที่ main.rs / winsvc/
 
 use crate::{config::Config, update::source::Source};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
@@ -10,9 +11,13 @@ pub struct InstallOptions {
     pub auto_update: bool,
     /// ว่าง = ใช้ค่าที่ฝังตอน build
     pub update_source: String,
+    pub web_update_source: String,
     pub allow_screen_input: bool,
     pub start: bool,
     pub json: bool,
+    pub ports: crate::config::Ports,
+    pub panel_tls: Option<(PathBuf, PathBuf)>,
+    pub allow_lan_panel: bool,
 }
 
 #[derive(Debug)]
@@ -37,6 +42,9 @@ pub enum Command {
     /// เปิดหน้าจัดการในเบราว์เซอร์ (ไม่ต้องใช้สิทธิ์ admin ขอแค่เป็นเจ้าของเครื่อง)
     Panel {
         local_port: Option<u16>,
+        lan: Option<String>,
+        enable_local: bool,
+        recover_web: bool,
     },
     /// ตัวช่วยจับภาพ/ส่ง input ใน session ผู้ใช้
     Helper,
@@ -47,10 +55,12 @@ pub const USAGE: &str = "การใช้งาน:
   synapta-connect [--port N] [--discovery-port N] [--local-port N] [--data-dir PATH] [--name TEXT] [--file-root PATH]
       เปิด agent ในเทอร์มินัล (ไม่ใช่ service)
   synapta-connect install [--plan] [--json] [--auto-update on|off] [--update-source SRC] [--allow-screen-input] [--owner USER] [--no-start]
+      [--port N] [--discovery-port N] [--local-port N] [--panel-cert PEM --panel-key PEM] [--allow-lan-panel]
+      [--web-update-source SRC]
       ติดตั้งเป็น Windows service (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect uninstall [--keep-data] [--json]
   synapta-connect service start|stop|status [--json]
-  synapta-connect panel        เปิดหน้าจัดการในเบราว์เซอร์
+  synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web]
   synapta-connect --version";
 
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
@@ -73,6 +83,9 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
         "helper" => Ok(Command::Helper),
         "panel" => {
             let mut port = None;
+            let mut lan = None;
+            let mut enable_local = false;
+            let mut recover_web = false;
             let mut it = rest.iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
@@ -80,13 +93,32 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                         port = Some(
                             it.next()
                                 .and_then(|v| v.parse().ok())
+                                .filter(|port| *port > 0)
                                 .ok_or("--local-port ต้องตามด้วยตัวเลข")?,
                         )
                     }
+                    "--lan" => {
+                        lan = Some(
+                            it.next()
+                                .filter(|host| !host.starts_with('-'))
+                                .ok_or("--lan ต้องมีชื่อเครื่องหรือ IPv4")?
+                                .clone(),
+                        )
+                    }
+                    "--enable-local" => enable_local = true,
+                    "--recover-web" => recover_web = true,
                     other => return Err(format!("ไม่รู้จักตัวเลือก {other}")),
                 }
             }
-            Ok(Command::Panel { local_port: port })
+            if lan.is_some() && enable_local {
+                return Err("เลือก --lan หรือ --enable-local อย่างใดอย่างหนึ่ง".into());
+            }
+            Ok(Command::Panel {
+                local_port: port,
+                lan,
+                enable_local,
+                recover_web,
+            })
         }
         "uninstall" => {
             let mut keep_data = false;
@@ -111,12 +143,18 @@ fn parse_install(args: &[String]) -> Result<Command, String> {
         owner: crate::platform::account().unwrap_or_default(),
         auto_update: true,
         update_source: String::new(),
+        web_update_source: String::new(),
         allow_screen_input: false,
         start: true,
         json: false,
+        ports: crate::config::Ports::default(),
+        panel_tls: None,
+        allow_lan_panel: false,
     };
     let mut plan_only = false;
     let mut it = args.iter();
+    let mut cert = None;
+    let mut key = None;
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().cloned().ok_or(format!("{name} ต้องมีค่าตามหลัง"));
         match flag.as_str() {
@@ -124,6 +162,19 @@ fn parse_install(args: &[String]) -> Result<Command, String> {
             "--json" => o.json = true,
             "--no-start" => o.start = false,
             "--allow-screen-input" => o.allow_screen_input = true,
+            "--allow-lan-panel" => o.allow_lan_panel = true,
+            "--port" | "--discovery-port" | "--local-port" => {
+                let port = value(flag)?
+                    .parse::<u16>()
+                    .map_err(|_| format!("{flag} ต้องเป็นพอร์ต 1–65535"))?;
+                match flag.as_str() {
+                    "--port" => o.ports.port = port,
+                    "--local-port" => o.ports.local_port = port,
+                    _ => o.ports.discovery_port = port,
+                }
+            }
+            "--panel-cert" => cert = Some(PathBuf::from(value(flag)?)),
+            "--panel-key" => key = Some(PathBuf::from(value(flag)?)),
             "--owner" => o.owner = value("--owner")?,
             "--auto-update" => {
                 o.auto_update = match value("--auto-update")?.as_str() {
@@ -132,14 +183,24 @@ fn parse_install(args: &[String]) -> Result<Command, String> {
                     _ => return Err("--auto-update รับ on หรือ off".into()),
                 }
             }
-            "--update-source" => {
-                let src = value("--update-source")?;
+            "--update-source" | "--web-update-source" => {
+                let src = value(flag)?;
                 Source::parse(&src)?;
-                o.update_source = src;
+                if flag == "--update-source" {
+                    o.update_source = src;
+                } else {
+                    o.web_update_source = src;
+                }
             }
             other => return Err(format!("ไม่รู้จักตัวเลือก {other}")),
         }
     }
+    o.ports.validate()?;
+    o.panel_tls = match (cert, key) {
+        (Some(cert), Some(key)) => Some((cert, key)),
+        (None, None) if !o.allow_lan_panel => None,
+        _ => return Err("ระบุ --panel-cert และ --panel-key พร้อมกัน เพื่อใช้ HTTPS บน LAN".into()),
+    };
     if o.owner.trim().is_empty() {
         return Err("ระบุเจ้าของเครื่องด้วย --owner <ชื่อผู้ใช้ Windows> (หาบัญชีปัจจุบันไม่ได้)".into());
     }
@@ -189,7 +250,10 @@ mod tests {
         ));
         assert!(matches!(
             p(&["panel", "--local-port", "9"]),
-            Ok(Command::Panel { local_port: Some(9) })
+            Ok(Command::Panel {
+                local_port: Some(9),
+                ..
+            })
         ));
         for bad in [
             &["service"][..],

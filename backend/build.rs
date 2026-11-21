@@ -3,8 +3,21 @@
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SYNAPTA_RELEASE_PUBKEY");
-    println!("cargo:rerun-if-changed=../frontend");
+    println!("cargo:rerun-if-changed=../frontend/dist");
+    println!("cargo:rerun-if-changed=../frontend/package.json");
     println!("cargo:rerun-if-changed=release/pubkey.hex");
+    assert!(
+        std::path::Path::new("../frontend/dist/index.html").is_file(),
+        "Build the panel first: npm ci --prefix ../frontend && npm run build --prefix ../frontend"
+    );
+    let panel_package = std::fs::read_to_string("../frontend/package.json").expect("missing frontend/package.json");
+    let panel_version = panel_package
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("\"version\": \""))
+        .and_then(|tail| tail.split_once('"'))
+        .map(|(version, _)| version)
+        .expect("set the panel version in frontend/package.json");
+    println!("cargo:rustc-env=SYNAPTA_PANEL_VERSION={panel_version}");
     let key = std::env::var("SYNAPTA_RELEASE_PUBKEY")
         .unwrap_or_else(|_| std::fs::read_to_string("release/pubkey.hex").unwrap_or_default());
     let key = key.trim();

@@ -13,6 +13,11 @@ use sha2::Sha256;
 pub const HELPER: &str = "helper-hello";
 pub const SERVER: &str = "helper-server";
 pub const HEALTH: &str = "health";
+pub const PANEL_CONTROL: &str = "panel-control";
+
+pub fn control_message(time: &str, nonce: &str, target: &str) -> String {
+    format!("{time}|{nonce}|{target}")
+}
 
 pub fn valid_local_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())

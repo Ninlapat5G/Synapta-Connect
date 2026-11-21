@@ -64,6 +64,16 @@ fn bad(code: &str, message: impl Into<String>) -> UpdateError {
 
 /// ตรวจลายเซ็นก่อน แล้วค่อยอ่านเนื้อ — manifest ที่ลายเซ็นไม่ผ่านไม่ถูก parse เลย
 pub fn verify(manifest_bytes: &[u8], signature_hex: &str, pubkey: &[u8; 32]) -> Result<Manifest, UpdateError> {
+    verify_signature(manifest_bytes, signature_hex, pubkey)?;
+    let m: Manifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|e| bad("manifest_invalid", format!("อ่าน manifest ไม่ได้: {e}")))?;
+    validate(m)
+}
+
+pub fn verify_signature(manifest_bytes: &[u8], signature_hex: &str, pubkey: &[u8; 32]) -> Result<(), UpdateError> {
+    if manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(bad("manifest_invalid", "manifest ใหญ่เกินกำหนด"));
+    }
     let signature = decode_hex(signature_hex.trim())
         .filter(|s| s.len() == 64)
         .ok_or_else(|| bad("signature_invalid", "ไฟล์ลายเซ็นผิดรูป — ไม่ติดตั้ง"))?;
@@ -74,10 +84,10 @@ pub fn verify(manifest_bytes: &[u8], signature_hex: &str, pubkey: &[u8; 32]) -> 
                 "signature_invalid",
                 "ลายเซ็นของ release ไม่ตรงกับ public key ของผู้เผยแพร่ — ไม่ติดตั้ง",
             )
-        })?;
+        })
+}
 
-    let m: Manifest = serde_json::from_slice(manifest_bytes)
-        .map_err(|e| bad("manifest_invalid", format!("อ่าน manifest ไม่ได้: {e}")))?;
+fn validate(m: Manifest) -> Result<Manifest, UpdateError> {
     let version = Version::parse(&m.version)
         .ok_or_else(|| bad("manifest_invalid", format!("เลขรุ่น '{}' ไม่ใช่รูป x.y.z", m.version)))?;
     if m.asset != Manifest::asset_name(&version.to_string()) {

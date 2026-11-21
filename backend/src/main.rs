@@ -27,8 +27,13 @@ fn run(command: Command) -> i32 {
                 }
             }
         }),
-        Command::Panel { local_port } => block_on(async {
-            match synapta_connect::open_panel::run(local_port).await {
+        Command::Panel {
+            local_port,
+            lan,
+            enable_local,
+            recover_web,
+        } => block_on(async {
+            match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web).await {
                 Ok(msg) => {
                     println!("{msg}");
                     0
