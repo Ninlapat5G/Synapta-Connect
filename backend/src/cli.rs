@@ -34,6 +34,10 @@ pub enum Command {
         keep_data: bool,
         json: bool,
     },
+    /// แทน exe ที่ติดตั้งด้วยตัวนี้ คง service/ข้อมูล/การจับคู่ไว้
+    Upgrade {
+        json: bool,
+    },
     ServiceStart,
     ServiceStop,
     ServiceStatus {
@@ -59,6 +63,8 @@ pub const USAGE: &str = "การใช้งาน:
       [--web-update-source SRC]
       ติดตั้งเป็น Windows service (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect uninstall [--keep-data] [--json]
+  synapta-connect upgrade [--json]
+      ใช้ไฟล์นี้แทนรุ่นที่ติดตั้งไว้ โดยคงการจับคู่และค่าตั้ง (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect service start|stop|status [--json]
   synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web]
   synapta-connect --version";
@@ -132,6 +138,11 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             }
             Ok(Command::Uninstall { keep_data, json })
         }
+        "upgrade" => match rest {
+            [] => Ok(Command::Upgrade { json: false }),
+            [flag] if flag == "--json" => Ok(Command::Upgrade { json: true }),
+            _ => Err("upgrade รับแค่ --json".into()),
+        },
         "install" => parse_install(rest),
         flag if flag.starts_with("--") => Config::from_flags(args.clone()).map(Command::Agent),
         other => Err(format!("ไม่รู้จักคำสั่ง '{other}'")),
@@ -241,6 +252,9 @@ mod tests {
             Ok(Command::ServiceStatus { json: true })
         ));
         assert!(matches!(p(&["updater", "run"]), Ok(Command::UpdaterRun)));
+        assert!(matches!(p(&["upgrade"]), Ok(Command::Upgrade { json: false })));
+        assert!(matches!(p(&["upgrade", "--json"]), Ok(Command::Upgrade { json: true })));
+        assert!(p(&["upgrade", "--force"]).is_err());
         assert!(matches!(
             p(&["uninstall", "--keep-data"]),
             Ok(Command::Uninstall {

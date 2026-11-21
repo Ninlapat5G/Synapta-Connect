@@ -508,19 +508,7 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
         }
         Ok(())
     });
-    run("stop_helpers", &mut || {
-        // helper ของทุกผู้ใช้ที่รันจากไฟล์ที่ติดตั้ง (ไม่แตะ synapta-connect.exe ที่ผู้ใช้เปิดเองจากที่อื่น)
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}'\" | Where-Object {{ $_.ExecutablePath -eq '{}' -and $_.ProcessId -ne {} -and $_.CommandLine -match '\\shelper\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
-            exe.display().to_string().replace('\'', "''"),
-            std::process::id(),
-        );
-        run_tool(
-            "powershell.exe",
-            &["-NoProfile", "-NonInteractive", "-Command", &script],
-        )
-        .map(|_| ())
-    });
+    run("stop_helpers", &mut || stop_helpers(&exe));
     run("delete_services", &mut || {
         for name in [AGENT_SERVICE, UPDATER_SERVICE] {
             if let Ok(service) = host::open(name, ServiceAccess::DELETE) {
@@ -561,6 +549,133 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
     });
     run("program_files", &mut || remove_program_dir(&dir));
     failures
+}
+
+/// หยุด helper ของทุกผู้ใช้ที่รันจากไฟล์ที่ติดตั้ง (ไม่แตะ synapta-connect.exe ที่ผู้ใช้เปิดเองจากที่อื่น)
+fn stop_helpers(exe: &Path) -> Result<(), String> {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}'\" | Where-Object {{ $_.ExecutablePath -eq '{}' -and $_.ProcessId -ne {} -and $_.CommandLine -match '\\shelper\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        exe.display().to_string().replace('\'', "''"),
+        std::process::id(),
+    );
+    run_tool(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+    )
+    .map(|_| ())
+}
+
+// ---------- อัปเกรดทับ ----------
+
+/// `upgrade`: ใช้ exe ตัวที่รันอยู่นี้แทนตัวที่ติดตั้งไว้ โดยคง service, ข้อมูล, การจับคู่ และค่าตั้งทั้งหมดไว้
+///
+/// เป็นทางของตัวติดตั้ง/ผู้ดูแลเมื่อยังไม่มีแหล่งอัปเดตที่เซ็นไว้ (ตัวอัปเดตอัตโนมัติยังเป็นทางหลัก)
+/// รุ่นใหม่ไม่ขึ้นภายใน 40 วินาที = ใส่ exe เดิมคืนแล้วเริ่ม service ใหม่ ไม่ทิ้งเครื่องไว้โดยไม่มี agent
+pub fn upgrade(json: bool) -> i32 {
+    let out = Out { json };
+    if !is_elevated::is_elevated() {
+        out.result(false, "ต้องรันด้วยสิทธิ์ Administrator (คลิกขวา > Run as administrator)");
+        return EXIT_NOT_ADMIN;
+    }
+    let (dir, data) = (install_dir(), service_data_dir());
+    let exe = dir.join(EXE_NAME);
+    let backup = dir.join("synapta-connect.previous.exe");
+    let layout = layout_for(&dir, &data, &data.join("updater"));
+    let current = Version::current();
+
+    let preflight = step(&out, "preflight", || {
+        if !host::service_exists(AGENT_SERVICE)? || !exe.is_file() {
+            return Err("ยังไม่ได้ติดตั้งบนเครื่องนี้ — ใช้ install".into());
+        }
+        let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        if same_file(&me, &exe) {
+            return Err("กำลังรันจากตัวที่ติดตั้งอยู่ — เรียก upgrade จากไฟล์รุ่นใหม่ที่ดาวน์โหลดมา".into());
+        }
+        let installed = installer::installed_version(&layout).and_then(|v| Version::parse(&v));
+        if installed.is_some_and(|v| v > current) {
+            return Err(format!("เครื่องนี้มีรุ่นที่ใหม่กว่า ({}) อยู่แล้ว", installed.unwrap()));
+        }
+        // สำรองค้างจากรอบก่อนต้องไม่ถูกใช้กู้คืนรอบนี้
+        let _ = std::fs::remove_file(&backup);
+        Ok(me)
+    });
+    let me = match preflight {
+        Ok(me) => me,
+        Err(e) => {
+            out.result(false, &format!("อัปเกรดไม่สำเร็จ: {e}"));
+            return EXIT_FAILED;
+        }
+    };
+
+    let swapped = step(&out, "stop_services", || {
+        for name in [UPDATER_SERVICE, AGENT_SERVICE] {
+            if host::service_exists(name)? {
+                host::stop_service(name)?;
+            }
+        }
+        Ok(())
+    })
+    .and_then(|_| step(&out, "stop_helpers", || stop_helpers(&exe)))
+    .and_then(|_| {
+        step(&out, "backup", || {
+            std::fs::copy(&exe, &backup)
+                .map(|_| ())
+                .map_err(|e| format!("สำรอง {} ไม่ได้: {e}", exe.display()))
+        })
+    })
+    .and_then(|_| step(&out, "copy_program", || copy_with_retry(&me, &exe)));
+    if let Err(e) = swapped {
+        // ยังไม่ได้แตะ exe เดิม (หรือคัดลอกไม่สำเร็จ) — เริ่ม service เดิมกลับ
+        if backup.is_file() {
+            let _ = copy_with_retry(&backup, &exe);
+        }
+        let _ = host::start_service(AGENT_SERVICE);
+        out.result(false, &format!("อัปเกรดไม่สำเร็จ ใช้รุ่นเดิมต่อ: {e}"));
+        return EXIT_FAILED;
+    }
+
+    let started = step(&out, "start", || {
+        installer::write_install_info(&layout, &current.to_string()).map_err(|e| e.to_string())?;
+        host::start_service(AGENT_SERVICE)?;
+        wait_healthy(Duration::from_secs(40)).map(|_| ())
+    });
+    if let Err(e) = started {
+        out.event("rollback", "start", "ใส่รุ่นเดิมคืน");
+        let _ = host::stop_service(AGENT_SERVICE);
+        let restored = copy_with_retry(&backup, &exe).and_then(|_| host::start_service(AGENT_SERVICE));
+        let detail = match restored {
+            Ok(()) => format!("อัปเกรดไม่สำเร็จ กลับไปใช้รุ่นเดิมแล้ว: {e}"),
+            Err(r) => format!(
+                "อัปเกรดไม่สำเร็จ และใส่รุ่นเดิมคืนไม่ได้ ({r}) — ไฟล์เดิมอยู่ที่ {}: {e}",
+                backup.display()
+            ),
+        };
+        out.result(false, &detail);
+        return EXIT_FAILED;
+    }
+    let _ = std::fs::remove_file(&backup);
+    out.result(true, &format!("อัปเกรดเป็น {current} เสร็จ — การจับคู่และค่าตั้งเดิมยังอยู่"));
+    EXIT_OK
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// คัดลอกทับ exe — โปรเซสของ service ที่เพิ่งหยุดอาจยังปล่อยไฟล์ไม่ทันครู่หนึ่ง
+fn copy_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..20 {
+        match std::fs::copy(from, to) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!("คัดลอก {} ไป {} ไม่ได้: {last}", from.display(), to.display()))
 }
 
 /// ลบโฟลเดอร์โปรแกรม; ถ้ากำลังรันจากในโฟลเดอร์นั้นเอง (ลบ exe ตัวเองไม่ได้) ให้ cmd ลบให้หลังโปรแกรมนี้ปิด

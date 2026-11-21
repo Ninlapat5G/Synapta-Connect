@@ -84,6 +84,7 @@ fn windows_only(command: Command) -> i32 {
             install::install(&options)
         }
         Command::Uninstall { keep_data, json } => install::uninstall(keep_data, json),
+        Command::Upgrade { json } => install::upgrade(json),
         Command::ServiceStart => report(winsvc::start_agent()),
         Command::ServiceStop => report(winsvc::stop_agent()),
         Command::ServiceStatus { json } => install::status(json),

@@ -1,8 +1,17 @@
-# Synapta Connect — เอกสารส่งต่องาน v0.3.3
+# Synapta Connect — เอกสารส่งต่องาน v0.3.4
 
 ภาพรวมการออกแบบ: `docs/SERVICE_AND_UPDATE.md` · สัญญา panel: `docs/PANEL_API.md` · การเผยแพร่: `docs/RELEASE.md` · license ส่วนประกอบ: `docs/THIRD_PARTY.md`
 
 ## 1. สถานะ
+
+### รอบ v0.3.4 (2026-11-21) — อัปเดตทับจากตัวติดตั้ง + แก้ถอนการติดตั้งรายงานผิด
+
+- บนเครื่องจริง ปุ่มถอนการติดตั้งขึ้น "ถอนการติดตั้งไม่สำเร็จ (รหัส 0)" ทั้งที่ถอนสำเร็จ: ตัวติดตั้งเรียก uninstall จาก exe ใน Program Files
+  ซึ่งลบตัวเองไม่ได้ทันทีจึงตั้งเวลาลบตามหลัง แต่หน้าต่างตรวจไฟล์ทันที — แก้ให้ทุกคำสั่งที่ยกสิทธิ์รันจาก agent ที่ฝังในตัวติดตั้ง และรอไฟล์หายก่อนตัดสิน
+- เพิ่ม `synapta-connect upgrade` (ผู้ดูแล): หยุด service/helper, สำรอง exe, คัดลอกตัวเองทับ, เริ่มและรอ health 40 วินาที ไม่ขึ้น = ใส่รุ่นเดิมคืน
+  ปฏิเสธการลดรุ่นและการรันจากตัวที่ติดตั้งอยู่ คงข้อมูล การจับคู่ ค่าตั้ง และ ACL ทั้งหมด
+- ตัวติดตั้งอ่านรุ่นที่ติดตั้งด้วย `--version` ถ้าเก่ากว่าจะมีปุ่ม "อัปเดตเป็น vX"
+- **ยังไม่ได้รัน `upgrade` จริง** (เซสชันนี้ไม่มีสิทธิ์ผู้ดูแล) ตรวจแค่ทางที่ไม่ใช่ผู้ดูแล (exit 3) และหน้าจอของตัวติดตั้ง — ต้องลองบนเครื่องปลายทาง
 
 ### รอบ v0.3.3 (2026-11-21) — ผลทดสอบบน Windows Server 2016 จริง + แก้ helper
 
@@ -60,10 +69,10 @@ Chrome เปิด panel จากไบนารีบน loopback และ�
 
 | อะไร | ที่ไหน |
 |---|---|
-| **ตัวติดตั้งสำหรับเครื่องปลายทาง (v0.3.3)** | `D:\claude_code\exe\SynaptaConnectSetup-v0.3.3.exe` (สำเนาใน `dist\release\backend\v0.3.3\`) |
-| agent ตัวเปล่า v0.3.3 (ทางสำรอง/ใช้อัปเดต) | `D:\claude_code\exe\SynaptaConnect-v0.3.3.exe` |
+| **ตัวติดตั้งสำหรับเครื่องปลายทาง (v0.3.4)** | `D:\claude_code\exe\SynaptaConnectSetup-v0.3.4.exe` (สำเนาใน `dist\release\backend\v0.3.4\`) |
+| agent ตัวเปล่า v0.3.4 (ทางสำรอง/ใช้อัปเดต) | `D:\claude_code\exe\SynaptaConnect-v0.3.4.exe` |
 | ซอร์สตัวติดตั้ง | `installer\windows\` |
-| เครื่องมือผู้เผยแพร่ (keygen/package/verify) | `D:\claude_code\exe\SynaptaRelease-v0.3.3.exe` |
+| เครื่องมือผู้เผยแพร่ (keygen/package/verify) | `D:\claude_code\exe\SynaptaRelease-v0.3.4.exe` |
 | เว็บ panel v0.1.2 ที่ build แล้ว | `dist\release\panel\v0.1.2\` |
 | ซอร์ส backend | `D:\claude_code\Synapta Connect\backend\` (`src\winsvc\`, `src\update\`, `src\local.rs`, `src\panel.rs`, `src\display.rs`, `src\helper.rs`, `src\proof.rs`, `src\cli.rs`) |
 | หน้าบ้าน (ฝังเข้า exe ตอน build จาก `frontend\`) | `D:\claude_code\Synapta Connect\frontend\` |
@@ -86,11 +95,11 @@ Chrome เปิด panel จากไบนารีบน loopback และ�
 
 0. **ทดสอบบน Windows Server 2016 จริง** (ทำแล้วบางส่วน ดูผลในข้อ 1 รอบ v0.3.3 — ที่เหลือคือจับภาพ/input ผ่าน helper)
    - ติดตั้ง Chrome หรือ Edge บนเครื่องก่อน (หน้า panel ใช้ IE ไม่ได้)
-   - ดับเบิลคลิก `SynaptaConnectSetup-v0.3.3.exe` ด้วยบัญชีเจ้าของ → UAC → หน้าเสร็จ → panel เปิดเองในเบราว์เซอร์
+   - ดับเบิลคลิก `SynaptaConnectSetup-v0.3.4.exe` ด้วยบัญชีเจ้าของ → UAC → หน้าเสร็จ → panel เปิดเองในเบราว์เซอร์
    - จับคู่กับ Synapta Code แล้วลอง `terminal.exec` และ **`pty.ws`** (เส้นทาง WinPTY ใน service จริง — เทสต์บนเครื่อง dev รันแบบ console เท่านั้น)
    - ถ้า PTY ล้ม ดู log ของ service และโฟลเดอร์ `C:\ProgramData\SynaptaConnect\winpty\` ว่ามี `winpty.dll` + `winpty-agent.exe`
    - ลองจับภาพ/ส่ง input ผ่าน helper, ถอนการติดตั้งจากตัวติดตั้งแล้วลงใหม่
-   - ถ้าเป็น Server Core (ไม่มีหน้า Desktop) ตัวติดตั้งแบบหน้าต่างใช้ไม่ได้ ให้ใช้ `SynaptaConnect-v0.3.3.exe install` แทน
+   - ถ้าเป็น Server Core (ไม่มีหน้า Desktop) ตัวติดตั้งแบบหน้าต่างใช้ไม่ได้ ให้ใช้ `SynaptaConnect-v0.3.4.exe install` แทน
 
 1. **ติดตั้งและถอน Windows Service จริง** — เจ้าของเปิด PowerShell แบบ Administrator แล้วรัน
    `powershell -ExecutionPolicy Bypass -File "D:\claude_code\Synapta Connect\backend\tests\admin\service-lifecycle.ps1"` (~10 นาที; ใช้กุญแจทดสอบ; ปฏิเสธรันถ้ามี service อยู่แล้วหรือพอร์ต 52401/52402 ถูกใช้; ถอนเองตอนจบแม้ล้ม; รายงาน `%TEMP%\synapta-admin-test-<id>\report.txt`). **ส่วนหลังขั้นติดตั้งของสคริปต์ยังไม่เคยรันจริง** — เจอ `[FAIL]` ให้แยกว่าบั๊กระบบหรือบั๊กสคริปต์ (บั๊กสคริปต์เคยเจอแล้ว 1 จุด: PowerShell 5.1 ถือ stderr ของ cargo เป็น error; สคริปต์ต้องเป็น UTF-8 **มี BOM**)

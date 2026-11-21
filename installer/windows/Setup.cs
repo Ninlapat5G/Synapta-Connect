@@ -32,6 +32,7 @@ internal static class Setup
         // โหมดที่หน้าต่างเรียกตัวเองซ้ำแบบยกสิทธิ์ (runas)
         if (args.Length == 5 && args[0] == "--install") return Install(args);
         if (args.Length >= 1 && args[0] == "--uninstall") return Uninstall(args.Length == 2 && args[1] == "--purge");
+        if (args.Length == 1 && args[0] == "--upgrade") return Upgrade();
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -81,11 +82,37 @@ internal static class Setup
     {
         int api, discovery, panel;
         if (!int.TryParse(args[1], out api) || !int.TryParse(args[2], out discovery) || !int.TryParse(args[3], out panel)
-            || !ValidPort(api) || !ValidPort(discovery) || !ValidPort(panel) || api == panel || !VerifyPayload())
+            || !ValidPort(api) || !ValidPort(discovery) || !ValidPort(panel) || api == panel)
             return ExitBadArguments;
         string owner = args[4].Replace("\"", "");
+        string arguments = "install --port " + api + " --discovery-port " + discovery + " --local-port " + panel + " --owner \"" + owner + "\"";
+        int code = RunAgent(arguments, "ติดตั้งไม่สำเร็จ");
+        if (code == ExitOk) SaveNotices();
+        return code;
+    }
 
-        // แตก agent ลงโฟลเดอร์ที่มีแค่ SYSTEM/Administrators เขียนได้ — ผู้ใช้ทั่วไปสลับไฟล์ก่อนรันด้วยสิทธิ์ผู้ดูแลไม่ได้
+    /// แทนโปรแกรมที่ติดตั้งด้วยรุ่นที่ฝังมา — agent คง service, การจับคู่ และค่าตั้งไว้ (และกู้รุ่นเดิมเองถ้ารุ่นใหม่ไม่ขึ้น)
+    private static int Upgrade()
+    {
+        int code = RunAgent("upgrade", "อัปเดตไม่สำเร็จ");
+        if (code == ExitOk) SaveNotices();
+        return code;
+    }
+
+    private static int Uninstall(bool purge)
+    {
+        if (!File.Exists(InstalledExe)) return ExitOk;
+        return RunAgent(purge ? "uninstall" : "uninstall --keep-data", "ถอนการติดตั้งไม่สำเร็จ");
+    }
+
+    /// รันคำสั่งด้วย agent ที่ฝังมา (ไม่ใช่ตัวใน Program Files)
+    ///
+    /// กับดัก: ถ้าใช้ตัวที่ติดตั้งสั่ง uninstall มันลบ exe ตัวเองไม่ได้ จึงตั้งเวลาให้ลบตามหลังไม่กี่วินาที
+    /// หน้าต่างที่ตรวจไฟล์ทันทีจะเห็นว่ายังอยู่แล้วรายงานว่าล้มทั้งที่สำเร็จ (เคยเกิดจริงบน Server 2016)
+    /// แตกลงโฟลเดอร์ที่มีแค่ SYSTEM/Administrators เขียนได้ — ผู้ใช้ทั่วไปสลับไฟล์ก่อนรันด้วยสิทธิ์ผู้ดูแลไม่ได้
+    private static int RunAgent(string arguments, string failureTitle)
+    {
+        if (!VerifyPayload()) return ExitBadArguments;
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(true, false);
         foreach (var sid in new[] { WellKnownSidType.BuiltinAdministratorsSid, WellKnownSidType.LocalSystemSid })
@@ -99,27 +126,14 @@ internal static class Setup
             string exe = Path.Combine(directory, "synapta-connect.exe");
             using (var source = Resource("agent.exe"))
             using (var output = new FileStream(exe, FileMode.CreateNew, FileAccess.Write, FileShare.None)) source.CopyTo(output);
-
-            string arguments = "install --port " + api + " --discovery-port " + discovery + " --local-port " + panel + " --owner \"" + owner + "\"";
             string log;
             int code = RunHidden(exe, arguments, out log);
-            if (code != 0)
-            {
-                ShowError("ติดตั้งไม่สำเร็จ", log);
-                return code;
-            }
-            try
-            {
-                string notice = Path.Combine(Path.GetDirectoryName(InstalledExe), "THIRD_PARTY_NOTICES.txt");
-                using (var source = Resource("notices.txt"))
-                using (var output = new FileStream(notice, FileMode.Create, FileAccess.Write, FileShare.Read)) source.CopyTo(output);
-            }
-            catch (Exception error) { ShowError("บันทึกเอกสารสิทธิ์ไม่สำเร็จ", "ติดตั้งสำเร็จแล้ว แต่คัดลอก THIRD_PARTY_NOTICES.txt ไม่ได้: " + error.Message); }
-            return ExitOk;
+            if (code != 0) ShowError(failureTitle, log);
+            return code;
         }
         catch (Exception error)
         {
-            ShowError("ติดตั้งไม่สำเร็จ", error.Message);
+            ShowError(failureTitle, error.Message);
             return ExitFailed;
         }
         finally
@@ -129,13 +143,28 @@ internal static class Setup
         }
     }
 
-    private static int Uninstall(bool purge)
+    private static void SaveNotices()
     {
-        if (!File.Exists(InstalledExe)) return ExitOk;
-        string log;
-        int code = RunHidden(InstalledExe, purge ? "uninstall" : "uninstall --keep-data", out log);
-        if (code != 0) ShowError("ถอนการติดตั้งไม่สำเร็จ", log);
-        return code;
+        try
+        {
+            string notice = Path.Combine(Path.GetDirectoryName(InstalledExe), "THIRD_PARTY_NOTICES.txt");
+            using (var source = Resource("notices.txt"))
+            using (var output = new FileStream(notice, FileMode.Create, FileAccess.Write, FileShare.Read)) source.CopyTo(output);
+        }
+        catch (Exception error) { ShowError("บันทึกเอกสารสิทธิ์ไม่สำเร็จ", "ติดตั้งสำเร็จแล้ว แต่คัดลอก THIRD_PARTY_NOTICES.txt ไม่ได้: " + error.Message); }
+    }
+
+    /// รุ่นของตัวที่ติดตั้ง (`synapta-connect --version`) — อ่านไม่ได้ = null
+    internal static Version InstalledVersion()
+    {
+        try
+        {
+            string log;
+            if (RunHidden(InstalledExe, "--version", out log) != 0) return null;
+            var match = System.Text.RegularExpressions.Regex.Match(log, @"(\d+)\.(\d+)\.(\d+)");
+            return match.Success ? new Version(match.Value) : null;
+        }
+        catch (Exception) { return null; }
     }
 
     private static bool ValidPort(int port) { return port >= 1 && port <= 65535; }
@@ -383,10 +412,13 @@ internal sealed class SetupForm : Form
     private readonly Panel content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Panel, Padding = new Padding(44, 40, 44, 32) };
     private readonly Label status = new Label { AutoSize = false, Dock = DockStyle.Fill, ForeColor = Theme.Danger, TextAlign = ContentAlignment.MiddleLeft };
     private readonly CheckBox purge = new CheckBox { AutoSize = true, Text = "ลบข้อมูลการจับคู่และค่าตั้งด้วย", ForeColor = Theme.Muted };
+    private readonly Version embedded;
+    private Version installed;
 
     public SetupForm()
     {
         string version = Setup.ResourceText("version.txt");
+        embedded = new Version(version);
         Text = "ติดตั้ง Synapta Connect";
         Font = Theme.Body(10);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -402,15 +434,21 @@ internal sealed class SetupForm : Form
         Controls.Add(new BrandPanel(version) { Dock = DockStyle.Left, Width = 300 });
         purge.Font = Theme.Body(9.5f);
 
-        if (File.Exists(Setup.InstalledExe)) ShowInstalled();
+        if (File.Exists(Setup.InstalledExe))
+        {
+            installed = Setup.InstalledVersion();
+            ShowInstalled();
+        }
         else ShowSetup();
     }
 
     internal void ShowPreviewPage(string page)
     {
         if (page == "progress") ShowProgress("กำลังติดตั้ง", "สร้าง service ตั้งสิทธิ์โฟลเดอร์ และเปิดไฟร์วอลล์เฉพาะเครือข่ายส่วนตัว");
-        else if (page == "done") ShowDone();
+        else if (page == "done") ShowDone(false);
+        else if (page == "upgraded") ShowDone(true);
         else if (page == "installed") ShowInstalled();
+        else if (page == "upgrade") { installed = new Version(0, 3, 2); ShowInstalled(); }
         else ShowSetup();
     }
 
@@ -467,8 +505,7 @@ internal sealed class SetupForm : Form
 
         var install = new PillButton { Text = "ติดตั้ง Synapta Connect", Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 0) };
         install.Click += StartInstall;
-        status.Text = "";
-        status.Height = 30;
+        ResetStatus();
         var note = new Label { Text = "Windows จะขอสิทธิ์ผู้ดูแลก่อนเริ่มติดตั้ง", AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Body(9), Anchor = AnchorStyles.None, Margin = new Padding(0, 10, 0, 0) };
         NewPage(Eyebrow("ขั้นตอนที่ 1 จาก 2"), Heading("ตั้งค่าเครื่องปลายทาง"),
             Paragraph("ใช้ค่าเริ่มต้นได้เลย หรือเปลี่ยนพอร์ตให้เข้ากับเครือข่ายของคุณ ภายหลังเปลี่ยนได้ในหน้าเครือข่ายของ panel"),
@@ -497,35 +534,59 @@ internal sealed class SetupForm : Form
         NewPage(Eyebrow("ขั้นตอนที่ 2 จาก 2"), Heading(title), Paragraph(detail), bar, null);
     }
 
-    private void ShowDone()
+    private void ShowDone(bool upgraded)
     {
         ClearPage();
         var open = new PillButton { Text = "เปิดหน้าจัดการ", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
         open.Click += delegate { OpenPanel(); };
         var close = new PillButton { Text = "ปิด", Primary = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
         close.Click += delegate { Close(); };
-        status.Text = "";
-        status.Height = 30;
-        NewPage(Badge("ติดตั้งเรียบร้อย", Theme.Good, Theme.GoodSoft), Heading("เครื่องนี้พร้อมเชื่อมต่อแล้ว"),
-            Paragraph("Synapta Connect ทำงานเป็น service เบื้องหลังและเริ่มเองทุกครั้งที่เปิดเครื่อง เปิดหน้าจัดการเพื่อสร้างรหัสจับคู่ให้ Synapta Code"),
-            Summary(), null, status, open, close);
+        ResetStatus();
+        if (upgraded)
+            NewPage(Badge("อัปเดตเรียบร้อย", Theme.Good, Theme.GoodSoft), Heading("ใช้รุ่น v" + embedded + " แล้ว"),
+                Paragraph("การจับคู่ ค่าตั้ง และสิทธิ์ที่เปิดไว้ยังอยู่เหมือนเดิม Synapta Code เชื่อมต่อต่อได้เลยโดยไม่ต้องจับคู่ใหม่"),
+                null, status, open, close);
+        else
+            NewPage(Badge("ติดตั้งเรียบร้อย", Theme.Good, Theme.GoodSoft), Heading("เครื่องนี้พร้อมเชื่อมต่อแล้ว"),
+                Paragraph("Synapta Connect ทำงานเป็น service เบื้องหลังและเริ่มเองทุกครั้งที่เปิดเครื่อง เปิดหน้าจัดการเพื่อสร้างรหัสจับคู่ให้ Synapta Code"),
+                Summary(), null, status, open, close);
         AcceptButton = open;
     }
 
     private void ShowInstalled()
     {
         ClearPage();
-        var open = new PillButton { Text = "เปิดหน้าจัดการ", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
+        bool outdated = installed != null && installed < embedded;
+        var open = new PillButton { Text = "เปิดหน้าจัดการ", Primary = !outdated, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
         open.Click += delegate { OpenPanel(); };
         var remove = new PillButton { Text = "ถอนการติดตั้ง", Primary = false, Tone = Theme.Danger, Dock = DockStyle.Fill, Margin = new Padding(0) };
         remove.Click += StartUninstall;
-        purge.Margin = new Padding(0, 0, 0, 14);
-        status.Text = "";
-        status.Height = 30;
+        purge.Margin = new Padding(0, 0, 0, 10);
+        ResetStatus();
+        string current = installed == null ? "" : "v" + installed;
+        if (outdated)
+        {
+            var upgrade = new PillButton { Text = "อัปเดตเป็น v" + embedded, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 10) };
+            upgrade.Click += StartUpgrade;
+            NewPage(Badge("มีรุ่นใหม่", Theme.Accent, Theme.AccentSoft), Heading("อัปเดตจาก " + current + " เป็น v" + embedded),
+                Paragraph("อัปเดตทับได้เลยโดยไม่ต้องถอน การจับคู่ ค่าตั้ง และสิทธิ์ที่เปิดไว้จะอยู่ครบ ถ้ารุ่นใหม่เริ่มไม่ขึ้น ระบบกลับไปใช้รุ่นเดิมให้เอง"),
+                null, status, upgrade, open, purge, remove);
+            AcceptButton = upgrade;
+            return;
+        }
+        string detail = installed != null && installed > embedded
+            ? "เครื่องนี้มี " + current + " ซึ่งใหม่กว่าตัวติดตั้งนี้ (v" + embedded + ") ใช้ต่อได้เลย"
+            : "รุ่น " + (current == "" ? "v" + embedded : current) + " ทำงานอยู่ ถ้าต้องการลงใหม่ด้วยพอร์ตอื่นให้ถอนการติดตั้งก่อน";
         NewPage(Badge("ติดตั้งอยู่แล้ว", Theme.Accent, Theme.AccentSoft), Heading("ติดตั้งบนเครื่องนี้แล้ว"),
-            Paragraph("รุ่นใหม่ติดตั้งผ่านหน้าอัปเดตใน panel ได้เลย หรือถอนการติดตั้งก่อนหากต้องการลงใหม่ด้วยพอร์ตอื่น"),
-            null, status, purge, open, remove);
+            Paragraph(detail), null, status, purge, open, remove);
         AcceptButton = open;
+    }
+
+    private void ResetStatus()
+    {
+        status.Text = "";
+        status.ForeColor = Theme.Danger;
+        status.Height = 30;
     }
 
     private static Control Badge(string text, Color tone, Color soft)
@@ -559,7 +620,7 @@ internal sealed class SetupForm : Form
         string arguments = "--install " + api.Value + " " + discovery.Value + " " + panel.Value + " \"" + owner + "\"";
         ShowProgress("กำลังติดตั้ง", "สร้าง service ตั้งสิทธิ์โฟลเดอร์ และเปิดไฟร์วอลล์เฉพาะเครือข่ายส่วนตัว อาจใช้เวลาราวหนึ่งนาที");
         int code = await RunElevated(arguments);
-        if (code == 0) { ShowDone(); OpenPanel(); return; }
+        if (code == 0) { installed = embedded; ShowDone(false); OpenPanel(); return; }
         ShowSetup();
         status.Text = code == 1223 ? "ยกเลิกการขอสิทธิ์ผู้ดูแลแล้ว" : "ติดตั้งไม่สำเร็จ (รหัส " + code + ") ดูรายละเอียดในหน้าต่างแจ้งเตือน";
     }
@@ -569,9 +630,21 @@ internal sealed class SetupForm : Form
         string arguments = purge.Checked ? "--uninstall --purge" : "--uninstall";
         ShowProgress("กำลังถอนการติดตั้ง", "หยุด service ลบกฎไฟร์วอลล์ และนำโปรแกรมออกจากเครื่อง");
         int code = await RunElevated(arguments);
-        if (code == 0 && !File.Exists(Setup.InstalledExe)) { ShowSetup(); return; }
+        // exit 0 = agent ถอนครบแล้ว ส่วนไฟล์อาจหายตามหลังไม่กี่วินาที จึงรอดูก่อนตัดสิน
+        for (int i = 0; code == 0 && i < 20 && File.Exists(Setup.InstalledExe); i++) await Task.Delay(500);
+        if (code == 0) { installed = null; ShowSetup(); return; }
         ShowInstalled();
         status.Text = code == 1223 ? "ยกเลิกการขอสิทธิ์ผู้ดูแลแล้ว" : "ถอนการติดตั้งไม่สำเร็จ (รหัส " + code + ")";
+    }
+
+    private async void StartUpgrade(object sender, EventArgs e)
+    {
+        ShowProgress("กำลังอัปเดต", "หยุด service ชั่วคราว เปลี่ยนโปรแกรมเป็นรุ่นใหม่ แล้วเริ่มกลับ ใช้เวลาไม่ถึงหนึ่งนาที");
+        int code = await RunElevated("--upgrade");
+        if (code == 0) { installed = Setup.InstalledVersion(); ShowDone(true); OpenPanel(); return; }
+        installed = Setup.InstalledVersion();
+        ShowInstalled();
+        status.Text = code == 1223 ? "ยกเลิกการขอสิทธิ์ผู้ดูแลแล้ว" : "อัปเดตไม่สำเร็จ (รหัส " + code + ") ยังใช้รุ่นเดิมอยู่";
     }
 
     /// เรียกตัวเองซ้ำด้วย runas แล้วรอผล — 1223 = ผู้ใช้กดยกเลิกหน้าต่าง UAC

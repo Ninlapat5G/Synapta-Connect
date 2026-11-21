@@ -5,12 +5,13 @@
 รองรับ Windows 10/11 และ Windows Server 2016 ขึ้นไป (เครื่องที่ไม่มี ConPTY เช่น Server 2016 ใช้ Terminal ผ่าน WinPTY ที่ฝังมาใน exe)
 
 **ทางหลัก:** ส่ง `SynaptaConnectSetup-v<backend>.exe` ไฟล์เดียว ดับเบิลคลิกด้วยบัญชีที่จะเป็นเจ้าของเครื่อง ตั้งพอร์ตแล้วกดติดตั้ง (ดู [installer/windows/README.md](../installer/windows/README.md))
+เครื่องที่ลงรุ่นเก่าไว้แล้ว เปิดตัวติดตั้งรุ่นใหม่แล้วกด **อัปเดตเป็น vX** ได้เลย การจับคู่และค่าตั้งอยู่ครบ (ทางบรรทัดคำสั่ง: `SynaptaConnect-v<ใหม่>.exe upgrade` ด้วยสิทธิ์ผู้ดูแล)
 
 **ทางสำรอง (Server Core หรือสคริปต์):** ส่ง `SynaptaConnect-v<backend>.exe` และ `THIRD_PARTY_NOTICES.txt` เปิด PowerShell แบบ Administrator ที่โฟลเดอร์ดาวน์โหลด แล้วรัน
 
 ```powershell
-.\SynaptaConnect-v0.3.3.exe install --port 52401 --discovery-port 52400 --local-port 52402
-.\SynaptaConnect-v0.3.3.exe panel
+.\SynaptaConnect-v0.3.4.exe install --port 52401 --discovery-port 52400 --local-port 52402
+.\SynaptaConnect-v0.3.4.exe panel
 ```
 
 หน้า panel ต้องใช้ Chrome, Edge หรือ Firefox — Server 2016 มีแค่ Internet Explorer มาให้ คำสั่ง `panel` จะข้าม IE ไปใช้เบราว์เซอร์รุ่นใหม่ที่ติดตั้งไว้ ถ้าไม่มีจะบอกให้ติดตั้งก่อน
