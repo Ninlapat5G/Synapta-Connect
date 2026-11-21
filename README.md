@@ -1,5 +1,7 @@
 # Synapta Connect (Phase 0 → v0.0.1: service + อัปเดตอัตโนมัติ)
 
+<img src="frontend/assets/synapta-connect.png" alt="โลโก้ Synapta Connect" width="128" height="128">
+
 > ระบบเชื่อมต่ออัจฉริยะระหว่าง **Synapta Code / น้องซิน** และเครื่องปลายทาง (Remote Host) เพื่อวิเคราะห์ทรัพยากร สั่งการเทอร์มินัล ควบคุมหน้าจอ และรับส่งไฟล์ความเร็วสูง ด้วย Rust Core Daemon ประสิทธิภาพสูง รองรับความปลอดภัยระดับ TLS 1.3 / mTLS และ SPAKE2 Zero-Knowledge PAKE
 
 ---
