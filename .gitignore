@@ -1,0 +1,6 @@
+/dist/
+/backend/target/
+/frontend/preview.png
+/media/*
+!/media/panel-redesign/
+!/media/themes/

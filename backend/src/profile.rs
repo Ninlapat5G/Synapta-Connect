@@ -1,0 +1,123 @@
+//! สเปกเครื่อง + ระดับสิทธิ์ของโปรเซสที่รัน agent
+
+use crate::{netif, rpc::Res};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use sysinfo::{
+    Disks, MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users,
+};
+
+#[derive(Deserialize, Default)]
+pub struct Params {
+    /// ส่ง environment variables ของ agent ด้วย (อาจมีความลับ จึงไม่ส่งโดยปริยาย)
+    #[serde(default)]
+    include_env: bool,
+}
+
+#[derive(Serialize)]
+pub struct Privilege {
+    /// standard | administrator | system (Windows) / standard | root (Unix)
+    pub level: &'static str,
+    pub user: String,
+}
+
+pub async fn get(p: Params) -> Res<Value> {
+    // sysinfo ต้องวัด CPU สองรอบห่างกันถึงจะได้ค่า usage — ทำใน thread แยกไม่ให้บล็อก runtime
+    let mut profile = tokio::task::spawn_blocking(collect).await??;
+    if p.include_env {
+        profile["env"] = json!(masked_env(std::env::vars()));
+    }
+    Ok(profile)
+}
+
+/// ค่าที่ปลอดภัยจะส่งตามจริง ที่เหลือส่งแค่ชื่อพร้อม "***" — ผลลัพธ์นี้ไปถึง LLM และ transcript ได้
+/// ถ้ารั่ว API key / รหัสผ่านใน env จะหลุดไปด้วย (ต้องการค่าจริงให้ใช้ exec.run อ่านเองโดยรู้ตัว)
+fn masked_env(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    const SAFE: [&str; 6] = ["PATH", "USERPROFILE", "HOME", "SHELL", "LANG", "OS"];
+    vars.map(|(k, v)| {
+        let shown = if SAFE.contains(&k.to_uppercase().as_str()) {
+            v
+        } else {
+            "***".into()
+        };
+        (k, shown)
+    })
+    .collect()
+}
+
+fn collect() -> Res<Value> {
+    let mut sys = System::new()?;
+    sys.refresh_cpu_all();
+    sys.refresh_memory();
+    std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_cpu_usage();
+
+    let disks: Vec<Value> = Disks::new_with_refreshed_list()?
+        .iter()
+        .map(|d| {
+            json!({"name": d.name().to_string_lossy(), "mount": d.mount_point(),
+                   "file_system": d.file_system().to_string_lossy(),
+                   "total_bytes": d.total_space(), "available_bytes": d.available_space(),
+                   "removable": d.is_removable()})
+        })
+        .collect();
+
+    Ok(json!({
+        "hostname": System::host_name().ok(),
+        "os": {"name": System::name().ok(), "version": System::long_os_version().ok(),
+               "kernel": System::kernel_version().ok(), "arch": System::cpu_arch()},
+        "cpu": {"model": sys.cpus().first().map(|c| c.brand().to_string()),
+                "physical_cores": System::physical_core_count().ok(),
+                "logical_cores": sys.cpus().len(),
+                "usage_percent": sys.global_cpu_usage()},
+        "memory": {"total_bytes": sys.total_memory(), "available_bytes": sys.available_memory()},
+        "disks": disks,
+        "network": netif::list(),
+        "privilege": privilege()?,
+        "agent": {"version": env!("CARGO_PKG_VERSION"), "pid": std::process::id()},
+    }))
+}
+
+pub fn privilege() -> Res<Privilege> {
+    let mut sys = System::new()?;
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_user(UpdateKind::OnlyIfNotSet),
+    );
+    let uid = sys.process(pid).and_then(|p| p.user_id());
+    let users = Users::new_with_refreshed_list()?;
+    let user = uid
+        .and_then(|u| users.get_user_by_id(u))
+        .map(|u| u.name().to_string())
+        .or_else(|| std::env::var("USERNAME").or_else(|_| std::env::var("USER")).ok())
+        .unwrap_or_else(|| "unknown".into());
+
+    // S-1-5-18 คือ SID ของบัญชี SYSTEM บน Windows (เช่น agent ที่ติดตั้งเป็น service)
+    let is_system = uid.is_some_and(|u| u.to_string() == "S-1-5-18");
+    let level = match (is_system, is_elevated::is_elevated(), cfg!(windows)) {
+        (true, _, _) => "system",
+        (false, true, true) => "administrator",
+        (false, true, false) => "root",
+        _ => "standard",
+    };
+    Ok(Privilege { level, user })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::masked_env;
+
+    #[test]
+    fn env_hides_everything_except_the_safe_list() {
+        let vars = [("Path", "C:\\bin"), ("OPENAI_API_KEY", "sk-secret"), ("LANG", "th_TH")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        let env = masked_env(vars);
+        assert_eq!(env["Path"], "C:\\bin");
+        assert_eq!(env["LANG"], "th_TH");
+        assert_eq!(env["OPENAI_API_KEY"], "***");
+    }
+}

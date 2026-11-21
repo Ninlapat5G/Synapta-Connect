@@ -1,0 +1,3 @@
+# เปลี่ยน CRT เป็นแบบ static: exe ไม่ต้องพึ่ง VCRUNTIME140.dll (เครื่องสะอาดที่ไม่มี VC++ Redistributable ก็รันตัวติดตั้งได้)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

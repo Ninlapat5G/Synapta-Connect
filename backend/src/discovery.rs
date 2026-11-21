@@ -1,0 +1,111 @@
+//! ให้ client หาเครื่องนี้เจอเอง: mDNS + UDP broadcast beacon + UDP probe
+//!
+//! ขอบเขตที่ต้องรู้: mDNS และ broadcast วิ่งได้เฉพาะในวง L2 เดียวกัน (LAN/Wi-Fi) —
+//! VPN แบบ L3 (Tailscale, WireGuard) ไม่ส่งต่อทั้งสองอย่าง จึงมี UDP probe:
+//! client ส่ง unicast `{"probe":"synapta-connect"}` ไปที่ IP:discovery_port ของเครื่องนี้
+//! (ผ่าน VPN ได้) แล้วได้ beacon ตอบกลับ; ถ้าไม่ได้เลยก็ต่อ IP:port ตรง ๆ (direct fallback)
+//!
+//! beacon บอกแค่ตัวตนพื้นฐาน — ใครบน LAN ก็อ่านได้ จึงไม่มี IP, OS, hostname, ระดับสิทธิ์
+
+use crate::{app::App, netif};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+use serde_json::{Value, json};
+use std::{net::SocketAddr, time::Duration};
+use tokio::net::UdpSocket;
+
+const SERVICE_TYPE: &str = "_synapta-connect._tcp.local.";
+const PROBE_MAGIC: &str = "synapta-connect";
+const BEACON_INTERVAL: Duration = Duration::from_secs(3);
+
+/// ต้องถือไว้ตลอดอายุโปรแกรม — ทิ้งเมื่อไหร่ mDNS หยุดประกาศ
+pub struct Discovery {
+    _mdns: Option<ServiceDaemon>,
+}
+
+fn beacon(app: &App) -> Value {
+    json!({
+        "protocol": "synapta-connect/v1",
+        "device_id": app.node_id,
+        "host_pubkey_fingerprint": app.host.fingerprint(),
+        "port": app.config.port,
+        "pairing_mode": app.auth.current_otp().is_some(),
+    })
+}
+
+/// เริ่มประกาศตัวเอง; ล้มเหลวส่วนไหนก็แค่ log (agent ยังต่อด้วย IP ตรงได้)
+pub async fn start(app: &App) -> Discovery {
+    let mdns = start_mdns(app).inspect_err(|e| tracing::warn!("mDNS ใช้ไม่ได้: {e}")).ok();
+    match UdpSocket::bind(("0.0.0.0", app.config.discovery_port)).await {
+        Ok(sock) => {
+            tokio::spawn(answer_probes(sock, app.clone()));
+        }
+        Err(e) => tracing::warn!("เปิด UDP {} ไม่ได้ (probe ใช้ไม่ได้): {e}", app.config.discovery_port),
+    }
+    tokio::spawn(broadcast_beacons(app.clone()));
+    Discovery { _mdns: mdns }
+}
+
+fn start_mdns(app: &App) -> Result<ServiceDaemon, mdns_sd::Error> {
+    let daemon = ServiceDaemon::new()?;
+    // ไม่ประกาศออกทาง VPN/virtual adapter: record ของ mDNS มี IP ของ interface อื่นรวมอยู่ด้วย
+    // (shortcut: ปิดตามรายชื่อ adapter ตอนเริ่ม — adapter VPN ที่เพิ่งต่อทีหลังยังไม่ถูกปิดจนกว่าจะ restart)
+    for iface in netif::list().into_iter().filter(|i| i.kind != "physical") {
+        daemon.disable_interface(IfKind::Name(iface.name))?;
+    }
+    daemon.disable_interface(IfKind::IPv6)?; // agent ฟังแค่ IPv4 ไม่ประกาศที่อยู่ที่ต่อไม่ได้
+    let fingerprint = app.host.fingerprint();
+    let props = [
+        ("device_id", app.node_id.as_str()),
+        ("fp", fingerprint.as_str()),
+        ("v", "1"),
+    ];
+    // ที่อยู่ว่าง + enable_addr_auto = ใช้ IP ปัจจุบันของทุก interface และตามเมื่อ interface เปลี่ยน
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        &app.node_id,
+        &format!("{}.local.", app.node_id),
+        "",
+        app.config.port,
+        &props[..],
+    )?
+    .enable_addr_auto();
+    daemon.register(info)?;
+    Ok(daemon)
+}
+
+/// ตอบ probe ด้วย beacon แบบ unicast กลับไปหาผู้ถาม
+async fn answer_probes(sock: UdpSocket, app: App) {
+    let mut buf = [0u8; 256];
+    loop {
+        let Ok((len, from)) = sock.recv_from(&mut buf).await else {
+            continue;
+        };
+        let is_probe = serde_json::from_slice::<Value>(&buf[..len]).is_ok_and(|v| v["probe"] == PROBE_MAGIC);
+        if is_probe {
+            let _ = sock.send_to(beacon(&app).to_string().as_bytes(), from).await;
+        }
+    }
+}
+
+/// ทุก 3 วินาที ส่ง beacon ออกทุก interface IPv4 แบบ physical (อ่านรายการใหม่ทุกรอบ เผื่อ interface เปลี่ยน)
+async fn broadcast_beacons(app: App) {
+    let mut tick = tokio::time::interval(BEACON_INTERVAL);
+    loop {
+        tick.tick().await;
+        let payload = beacon(&app).to_string();
+        for iface in netif::list().into_iter().filter(|i| i.kind == "physical") {
+            let (std::net::IpAddr::V4(ip), Some(bcast)) = (iface.ip, iface.broadcast) else {
+                continue;
+            };
+            // bind ที่ IP ของ interface นั้น เพื่อให้ OS ส่งออกทาง interface นั้นจริง ๆ
+            let Ok(sock) = UdpSocket::bind(SocketAddr::from((ip, 0))).await else {
+                continue;
+            };
+            if sock.set_broadcast(true).is_ok() {
+                let _ = sock
+                    .send_to(payload.as_bytes(), (bcast, app.config.discovery_port))
+                    .await;
+            }
+        }
+    }
+}

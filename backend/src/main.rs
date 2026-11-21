@@ -1,0 +1,110 @@
+use synapta_connect::cli::{self, Command};
+use tracing_subscriber::EnvFilter;
+
+fn main() {
+    let command = cli::parse(std::env::args().skip(1).collect()).unwrap_or_else(|e| {
+        eprintln!("{e}\n\n{}", cli::USAGE);
+        std::process::exit(2);
+    });
+    std::process::exit(run(command));
+}
+
+/// คืน exit code
+fn run(command: Command) -> i32 {
+    match command {
+        Command::Version => {
+            println!("synapta-connect {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        Command::Agent(config) => block_on(async {
+            synapta_connect::platform::init();
+            init_console_log();
+            match synapta_connect::run(config).await {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("agent หยุดทำงาน: {e:#}");
+                    1
+                }
+            }
+        }),
+        Command::Panel { local_port } => block_on(async {
+            match synapta_connect::open_panel::run(local_port).await {
+                Ok(msg) => {
+                    println!("{msg}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }),
+        Command::Helper => block_on(async {
+            synapta_connect::platform::init(); // DPI เหมือน agent: ภาพกับเมาส์ต้องใช้พิกเซลเดียวกัน
+            synapta_connect::helper::run().await.map_or(1, |_| 0)
+        }),
+        other => windows_only(other),
+    }
+}
+
+fn block_on(future: impl std::future::Future<Output = i32>) -> i32 {
+    tokio::runtime::Runtime::new()
+        .expect("สร้าง tokio runtime ไม่ได้")
+        .block_on(future)
+}
+
+fn init_console_log() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "synapta_connect=info".into()))
+        .init();
+}
+
+#[cfg(windows)]
+fn windows_only(command: Command) -> i32 {
+    use synapta_connect::winsvc::{self, install};
+    match command {
+        Command::ServiceRun => winsvc::run_agent_service().map_or_else(service_start_error, |_| 0),
+        Command::UpdaterRun => winsvc::run_updater_service().map_or_else(service_start_error, |_| 0),
+        Command::Install { options, plan_only } => {
+            if plan_only {
+                for (step, detail) in install::plan(&options) {
+                    if options.json {
+                        println!("{}", serde_json::json!({"step": step, "detail": detail}));
+                    } else {
+                        println!("- {detail}");
+                    }
+                }
+                return 0;
+            }
+            install::install(&options)
+        }
+        Command::Uninstall { keep_data, json } => install::uninstall(keep_data, json),
+        Command::ServiceStart => report(winsvc::start_agent()),
+        Command::ServiceStop => report(winsvc::stop_agent()),
+        Command::ServiceStatus { json } => install::status(json),
+        _ => unreachable!("คำสั่งอื่นจัดการใน run()"),
+    }
+}
+
+#[cfg(windows)]
+fn report(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+#[cfg(windows)]
+fn service_start_error(e: windows_service::Error) -> i32 {
+    eprintln!("คำสั่งนี้ให้ Windows (SCM) เรียกเท่านั้น ไม่ใช่สั่งมือ: {e}");
+    1
+}
+
+#[cfg(not(windows))]
+fn windows_only(_: Command) -> i32 {
+    eprintln!("คำสั่งนี้ใช้ได้เฉพาะ Windows");
+    2
+}

@@ -1,0 +1,7 @@
+# Synapta Connect panel
+
+The panel is served by the agent at /panel/ and is opened by running `synapta-connect.exe panel`. It exchanges the one-time URL code for an in-memory token; opening index.html directly shows the reopen instructions. Anuphan and Chakra Petch from Google Fonts are bundled under assets/fonts with their licenses. The panel loads its fonts and other assets from the local agent.
+
+The install guide generates a PowerShell command; it does not execute installation or simulate progress. Run the command from the executable folder in an Administrator PowerShell. The release repository is not yet configured; enter the actual source once confirmed. Review command options before running.
+
+Verification: `node --check frontend/app.js`. With a test agent and an authorized one-time code, test pairing/open/close and revoke, update check/apply/retry, settings persistence, screen-input and a service restart during applying. Verify expired/invalid code and token return users to the reopen instructions. Check keyboard focus, phone and desktop widths, offline assets, and service account permissions. Installation, updates, rollback, and error recovery require Windows end-to-end tests with the real backend.

@@ -1,0 +1,47 @@
+[package]
+name = "synapta-connect"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
+base64 = "0.23.1"
+enigo = "0.6.1"
+futures-util = "0.3.34"
+hmac = "0.13.0"
+hyper-util = { version = "0.1.21", features = ["server-auto", "tokio", "service"] }
+if-addrs = "0.15.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+is_elevated = "0.1.2"
+mdns-sd = "0.22.0"
+portable-pty = "0.9.0"
+rand = "0.10.4"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+ring = "0.17"
+rust-embed = { version = "8", features = ["include-exclude", "mime-guess"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+spake2 = "0.4.0"
+sysinfo = "0.40.4"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-tungstenite = "0.30.0"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["cors", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+x509-parser = "0.18.1"
+xcap = "0.9.10"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_RemoteDesktop", "Win32_System_Threading"] }
+windows-service = "0.8.1"
+
