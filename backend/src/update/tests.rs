@@ -157,9 +157,12 @@ async fn without_public_key_or_source_nothing_can_be_installed() {
     assert_eq!(f.state(), "not_configured");
     assert!(f.status()["available"].is_null());
 
+    // ลบแหล่งแล้วจะกลับไปใช้แหล่งที่ฝังใน release/source.txt — ไม่มีให้กลับ = ยังไม่ได้ตั้ง
     let f = fixture();
-    f.mgr.set_settings(true, Some(String::new())).unwrap(); // ลบแหล่ง (ไม่มีค่าเริ่มต้นที่ฝังไว้)
-    assert_eq!(f.state(), "not_configured");
+    f.mgr.set_settings(true, Some(String::new())).unwrap();
+    if crate::settings::Settings::default().effective_source().is_empty() {
+        assert_eq!(f.state(), "not_configured");
+    }
 }
 
 #[tokio::test]

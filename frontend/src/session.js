@@ -3,10 +3,22 @@ import { request, routes } from './api';
 
 const offline = 'เชื่อมต่อ Agent ไม่ได้ กำลังลองใหม่อัตโนมัติ';
 const locked = 'เปิดหน้าจัดการจากเครื่องที่ติดตั้งด้วยคำสั่งด้านล่าง ลิงก์เปิดหน้ามีอายุ 60 วินาทีและใช้ได้ครั้งเดียว';
-const expired = 'เซสชันหมดอายุหรือรหัสเปิดหน้าใช้ไม่ได้ กรุณาขอลิงก์ใหม่';
+const linkExpired = 'ลิงก์เปิดหน้านี้หมดอายุหรือถูกใช้ไปแล้ว รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
+const reloaded = 'หน้าถูกโหลดใหม่ จึงต้องยืนยันสิทธิ์อีกครั้ง รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
+const expired = 'เซสชันหมดอายุ รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
+const openedKey = 'synapta-connect-opened';
+
+// A reload drops the one-time code from the address, so tell that apart from a first visit.
+function lockedMessage(code) {
+  try {
+    if (code) sessionStorage.setItem(openedKey, '1');
+    else if (sessionStorage.getItem(openedKey)) return reloaded;
+  } catch { /* Browser storage may be disabled. */ }
+  return locked;
+}
 
 export function useSession(code) {
-  const [state, setState] = useState({ connection: code ? 'opening' : 'locked', message: locked });
+  const [state, setState] = useState(() => ({ connection: code ? 'opening' : 'locked', message: lockedMessage(code) }));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const operation = useRef(null);
@@ -61,13 +73,13 @@ export function useSession(code) {
     request(routes.exchange, { method: 'POST', body: { code }, signal: active.signal })
       .then(session => {
         if (active.signal.aborted) return;
-        if (!session.token) throw new Error(expired);
+        if (!session.token) throw new Error(linkExpired);
         token.current = session.token;
         return poll();
       })
       .catch(error => {
         if (!active.signal.aborted) {
-          setState({ connection: 'locked', message: error.status === 403 ? expired : 'เชื่อมต่อเพื่อยืนยันตัวตนไม่ได้ กรุณาขอลิงก์ใหม่' });
+          setState({ connection: 'locked', message: error.status === 403 ? linkExpired : 'เชื่อมต่อเพื่อยืนยันตัวตนไม่ได้ กรุณาขอลิงก์ใหม่' });
         }
       });
     document.addEventListener('visibilitychange', poll);

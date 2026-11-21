@@ -1,8 +1,18 @@
-# Synapta Connect — เอกสารส่งต่องาน v0.3.4
+# Synapta Connect — เอกสารส่งต่องาน v0.3.5
 
 ภาพรวมการออกแบบ: `docs/SERVICE_AND_UPDATE.md` · สัญญา panel: `docs/PANEL_API.md` · การเผยแพร่: `docs/RELEASE.md` · license ส่วนประกอบ: `docs/THIRD_PARTY.md`
 
 ## 1. สถานะ
+
+### รอบ v0.3.5 (2026-11-22) — รุ่นแรกที่อัปเดตตัวเองได้
+
+- repo เปิดเป็น public แบบสงวนสิทธิ์ (LICENSE ใส่ชื่อ Ninlapat5G) เพื่อให้ตัวอัปเดตอ่าน GitHub Releases ได้โดยไม่ล็อกอิน
+- ฝัง public key `166f2acdfe579251700c9e291fed6e77f614b2204f8e45adb2c1423ed588389d` และแหล่ง `github:Ninlapat5G/Synapta-Connect` ใน `backend/release/`
+  กุญแจเซ็นอยู่ที่ `C:\Users\MSII\.synapta-release\synapta-release.key` บนเครื่อง dev (นอก repo) ต้องมีสำเนาสำรองอีกที่
+- เครื่องที่เป็น v0.3.4 อัปเดตเองไม่ได้ (ไม่มีกุญแจ) ต้องเปิด `SynaptaConnectSetup-v0.3.5.exe` แล้วกด **อัปเดตเป็น v0.3.5** หนึ่งครั้ง จากนั้นใช้ **ตรวจอัปเดต** หรือ **อัปเดตอัตโนมัติ** ใน panel
+- หน้าขอสิทธิ์ของ panel คัดลอกคำสั่งที่วางใน PowerShell ได้ทันที (`& "$env:ProgramFiles\SynaptaConnect\synapta-connect.exe" panel`) และแยกข้อความลิงก์หมดอายุ โหลดหน้าใหม่ และเซสชันหมดอายุออกจากกัน
+- เทสต์สองตัวที่ถือว่า public key ต้องเป็นศูนย์ ปรับให้ไม่ขึ้นกับค่าที่ฝังตอน build
+- **ยังไม่ได้ทดสอบ:** อัปเดตจริงจาก v0.3.5 ไปรุ่นถัดไป (ทำได้เมื่อออก v0.3.6 ด้วยกุญแจเดิม) และ `upgrade` ทับ v0.3.4 บน app01
 
 ### รอบ v0.3.4 (2026-11-21) — อัปเดตทับจากตัวติดตั้ง + แก้ถอนการติดตั้งรายงานผิด
 

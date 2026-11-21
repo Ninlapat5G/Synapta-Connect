@@ -18,7 +18,9 @@ const pages = [
   ['settings', 'ตั้งค่า', Settings2],
   ['install', 'คู่มือติดตั้ง', CircleHelp],
 ];
-const openCommand = 'synapta-connect.exe panel';
+// The installer puts the agent in Program Files, which is not on PATH; PowerShell needs `&` for a quoted path.
+const installedAgent = String.raw`& "$env:ProgramFiles\SynaptaConnect\synapta-connect.exe"`;
+const openCommand = installedAgent + ' panel';
 const themeKey = 'synapta-connect-theme';
 
 function initialTheme() {
@@ -78,7 +80,7 @@ function OpenPanel({ message, notify }) {
       <code className="break-all text-sm">{openCommand}</code>
       <CopyButton text={openCommand} onError={notify} />
     </div>
-    <p className="mt-3 text-sm text-muted">ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="text-ink">{openCommand} --lan ชื่อเครื่อง</code></p>
+    <p className="mt-3 text-sm text-muted">วางคำสั่งใน PowerShell บนเครื่องปลายทาง ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="break-all text-ink">{openCommand} --lan ชื่อเครื่อง</code></p>
   </Card>;
 }
 

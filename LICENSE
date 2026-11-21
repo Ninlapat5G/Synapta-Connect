@@ -1,9 +1,9 @@
 Synapta Connect
-Copyright (c) 2026 [ชื่อเจ้าของลิขสิทธิ์]. All Rights Reserved.
+Copyright (c) 2026 Ninlapat5G (https://github.com/Ninlapat5G). All Rights Reserved.
 
-(ผู้เผยแพร่ต้องแทน [ชื่อเจ้าของลิขสิทธิ์] ด้วยชื่อที่ถูกต้องตามกฎหมายก่อนเผยแพร่ — ดู docs/RELEASE.md §1)
-
-This source code is made publicly visible for reading and review only.
+This source code is made publicly visible for reading and review only. Compiled
+releases are published so the copyright holder's own installations can download
+and update the software; they are not offered under any other license.
 No license, express or implied, is granted to use, copy, modify, merge, publish,
 distribute, sublicense, sell, or create derivative works of this software or any
 part of it, except as expressly permitted in writing by the copyright holder.

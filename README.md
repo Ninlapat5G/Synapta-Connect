@@ -2,6 +2,12 @@
 
 <img src="frontend/assets/synapta-connect.png" alt="โลโก้ Synapta Connect" width="128" height="128">
 
+## ดาวน์โหลดและสิทธิ์การใช้งาน
+
+ดาวน์โหลดตัวติดตั้ง `SynaptaConnectSetup-v<รุ่น>.exe` ได้จากหน้า [Releases](https://github.com/Ninlapat5G/Synapta-Connect/releases/latest) เครื่องที่ติดตั้งรุ่น 0.3.5 ขึ้นไปจะอ่านอัปเดตที่เซ็นแล้วจากหน้าเดียวกันนี้เอง
+
+repo นี้เปิดให้ดูโค้ดและดาวน์โหลดรุ่นที่ปล่อยเท่านั้น ลิขสิทธิ์ทั้งหมดเป็นของเจ้าของโครงการ ไม่ใช่ open source ห้ามนำไปใช้ ดัดแปลง หรือแจกจ่ายต่อโดยไม่ได้รับอนุญาตเป็นลายลักษณ์อักษร ดูรายละเอียดใน [LICENSE](LICENSE)
+
 ## Panel ปัจจุบัน
 
 เปิดด้วย `synapta-connect.exe panel` หรือเข้า `http://localhost:52402/synaptaconnect` ตามพอร์ตที่ตั้งไว้ หน้า **เครือข่าย** จัดการช่องทาง localhost และ HTTPS บน LAN พร้อมเปลี่ยนพอร์ตเว็บ, Agent API และ discovery ได้

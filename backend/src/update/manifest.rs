@@ -40,7 +40,12 @@ impl Manifest {
 
 /// public key ที่ฝังไว้ — None เมื่อ build นี้ยังไม่ได้ตั้งค่า (ปิดการติดตั้งอัปเดต)
 pub fn embedded_pubkey() -> Option<[u8; 32]> {
-    let key = parse_hex32(EMBEDDED_PUBKEY.trim())?;
+    configured_pubkey(EMBEDDED_PUBKEY)
+}
+
+/// ศูนย์ล้วนคือค่าว่างใน release/pubkey.hex
+fn configured_pubkey(text: &str) -> Option<[u8; 32]> {
+    let key = parse_hex32(text.trim())?;
     (key != [0u8; 32]).then_some(key)
 }
 
@@ -196,7 +201,8 @@ mod tests {
 
     #[test]
     fn placeholder_pubkey_means_not_configured() {
-        assert_eq!(embedded_pubkey(), None);
+        assert_eq!(configured_pubkey(&"0".repeat(64)), None);
+        assert_eq!(configured_pubkey(&"ab".repeat(32)), Some([0xab; 32]));
         assert_eq!(parse_hex32(&"ab".repeat(32)), Some([0xab; 32]));
         assert_eq!(parse_hex32("abc"), None);
     }
