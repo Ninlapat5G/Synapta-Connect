@@ -20,7 +20,7 @@ use tokio::{
 use tower::ServiceExt;
 use windows::{
     Win32::{
-        Foundation::{HLOCAL, LocalFree},
+        Foundation::{ERROR_PIPE_BUSY, HLOCAL, LocalFree},
         Security::{
             Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
@@ -255,24 +255,39 @@ pub async fn serve(app: App) {
     }
 }
 
-fn open(name: &str) -> io::Result<NamedPipeClient> {
+async fn open(name: &str) -> io::Result<NamedPipeClient> {
     let name = windows::core::HSTRING::from(name);
-    let handle = unsafe {
-        CreateFileW(
-            &name,
-            0x12019b,
-            FILE_SHARE_MODE(0),
-            None,
-            OPEN_EXISTING,
-            // SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION prevents server impersonation.
-            FILE_FLAG_OVERLAPPED | FILE_FLAGS_AND_ATTRIBUTES(0x0011_0000),
-            None,
-        )
+    loop {
+        // Kept in its own scope: a raw HANDLE is not Send, so it must not live across the await.
+        {
+            let opened = unsafe {
+                CreateFileW(
+                    &name,
+                    0x12019b,
+                    FILE_SHARE_MODE(0),
+                    None,
+                    OPEN_EXISTING,
+                    // SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION prevents server impersonation.
+                    FILE_FLAG_OVERLAPPED | FILE_FLAGS_AND_ATTRIBUTES(0x0011_0000),
+                    None,
+                )
+            };
+            // The Agent keeps one listening instance and creates the next only after accepting a
+            // client. The panel sends two requests per poll, so the second one regularly hit
+            // ERROR_PIPE_BUSY and the Desktop flashed "cannot connect to Agent". Busy means the
+            // Agent is alive: wait for the next instance (the caller's timeout bounds this loop).
+            match opened {
+                Ok(handle) => {
+                    let file = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+                    // The returned pipe owns the handle. Convert before handing it to Tokio.
+                    return unsafe { NamedPipeClient::from_raw_handle(file.into_raw_handle()) };
+                }
+                Err(error) if error.code() == ERROR_PIPE_BUSY.to_hresult() => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
     }
-    .map_err(io::Error::other)?;
-    let file = unsafe { OwnedHandle::from_raw_handle(handle.0) };
-    // The returned pipe owns the handle. Convert before handing it to Tokio.
-    unsafe { NamedPipeClient::from_raw_handle(file.into_raw_handle()) }
 }
 
 pub async fn request(method: String, path: String, body: Option<Value>) -> io::Result<Reply> {
@@ -285,7 +300,7 @@ pub async fn request(method: String, path: String, body: Option<Value>) -> io::R
         return Err(io::ErrorKind::NotConnected.into());
     }
     timeout(TIMEOUT, async {
-        let mut pipe = open(&pipe_name(token))?;
+        let mut pipe = open(&pipe_name(token)).await?;
         let client_nonce = crate::hex::random_id(16);
         write(&mut pipe, &client_nonce, 128).await?;
         let hello: Frame = read(&mut pipe, 256).await?;
@@ -323,7 +338,7 @@ mod tests {
         let name = format!("{PIPE}.test-{}", crate::hex::random_id(8));
         let mut listener = create(&name, true).unwrap();
         async {
-            let mut client = open(&name).unwrap();
+            let mut client = open(&name).await.unwrap();
             listener.connect().await.unwrap();
             let _next = create(&name, false).unwrap();
             write(&mut client, &"test", 128).await.unwrap();
@@ -332,5 +347,21 @@ mod tests {
             assert_eq!(read::<String>(&mut client, 128).await.unwrap(), "ready");
         }
         .await;
+    }
+
+    #[tokio::test]
+    async fn waits_for_the_next_instance_instead_of_failing_when_busy() {
+        let name = format!("{PIPE}.test-{}", crate::hex::random_id(8));
+        let _listener = create(&name, true).unwrap();
+        let _first = open(&name).await.unwrap();
+        let second = tokio::spawn({
+            let name = name.clone();
+            async move { open(&name).await }
+        });
+        sleep(Duration::from_millis(150)).await;
+        assert!(!second.is_finished(), "the only instance is taken, so the second client must wait");
+        let _next = create(&name, false).unwrap();
+        let second = timeout(Duration::from_secs(2), second).await.unwrap().unwrap();
+        assert!(second.is_ok());
     }
 }
