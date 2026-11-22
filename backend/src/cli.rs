@@ -49,6 +49,8 @@ pub enum Command {
         lan: Option<String>,
         enable_local: bool,
         recover_web: bool,
+        /// เปิดจากไอคอน: แจ้งข้อผิดพลาดเป็นกล่องข้อความ (หน้าต่าง console ปิดทันทีจนอ่านไม่ทัน)
+        gui: bool,
     },
     /// ตัวช่วยจับภาพ/ส่ง input ใน session ผู้ใช้
     Helper,
@@ -66,7 +68,7 @@ pub const USAGE: &str = "การใช้งาน:
   synapta-connect upgrade [--json]
       ใช้ไฟล์นี้แทนรุ่นที่ติดตั้งไว้ โดยคงการจับคู่และค่าตั้ง (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect service start|stop|status [--json]
-  synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web]
+  synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web] [--gui]
   synapta-connect --version";
 
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
@@ -92,6 +94,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             let mut lan = None;
             let mut enable_local = false;
             let mut recover_web = false;
+            let mut gui = false;
             let mut it = rest.iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
@@ -113,6 +116,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     }
                     "--enable-local" => enable_local = true,
                     "--recover-web" => recover_web = true,
+                    "--gui" => gui = true,
                     other => return Err(format!("ไม่รู้จักตัวเลือก {other}")),
                 }
             }
@@ -124,6 +128,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                 lan,
                 enable_local,
                 recover_web,
+                gui,
             })
         }
         "uninstall" => {

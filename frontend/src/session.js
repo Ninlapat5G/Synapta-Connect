@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { request, routes } from './api';
 
 const offline = 'เชื่อมต่อ Agent ไม่ได้ กำลังลองใหม่อัตโนมัติ';
-const locked = 'เปิดหน้าจัดการจากเครื่องที่ติดตั้งด้วยคำสั่งด้านล่าง ลิงก์เปิดหน้ามีอายุ 60 วินาทีและใช้ได้ครั้งเดียว';
-const linkExpired = 'ลิงก์เปิดหน้านี้หมดอายุหรือถูกใช้ไปแล้ว รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
-const reloaded = 'หน้าถูกโหลดใหม่ จึงต้องยืนยันสิทธิ์อีกครั้ง รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
-const expired = 'เซสชันหมดอายุ รันคำสั่งด้านล่างเพื่อขอลิงก์ใหม่';
+const locked = 'เปิดหน้าจัดการจากไอคอน Synapta Connect หรือคำสั่งด้านล่าง บนเครื่องที่ติดตั้ง';
+const linkExpired = 'ลิงก์เปิดหน้านี้หมดอายุหรือถูกใช้ไปแล้ว เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
+const reloaded = 'หน้าถูกโหลดใหม่ จึงต้องยืนยันสิทธิ์อีกครั้ง เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
+const expired = 'เซสชันหมดอายุ เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
 const openedKey = 'synapta-connect-opened';
 
 // A reload drops the one-time code from the address, so tell that apart from a first visit.

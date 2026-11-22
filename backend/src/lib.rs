@@ -32,6 +32,8 @@ pub mod pty;
 pub mod rpc;
 pub mod screen;
 pub mod settings;
+#[cfg(windows)]
+pub mod shortcut;
 pub mod tls;
 pub mod transfer;
 pub mod update;

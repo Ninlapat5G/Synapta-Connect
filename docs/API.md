@@ -199,6 +199,22 @@ PTY เป็นของ WebSocket ที่เปิด — **ปิด connec
 - entry = `{"name", "path", "kind": "directory"|"file", "size"?}` · path ที่ส่งกลับไม่มี prefix `\\?\` ใช้ต่อกับ `exec.run`/`transfer.*` ได้ตรง ๆ
 - ฟิลด์ที่ไม่มีค่าจะไม่ถูกส่ง (ไม่ใช่ `null`) ตามสัญญา `connectPathResult` ของ SynaptaCode
 
+#### อัปเดตจากระยะไกล (ตั้งแต่ v0.3.7, `backend/src/update/remote.rs`)
+ใช้งานเดียวกับปุ่มในหน้า panel (ตรวจลายเซ็น Ed25519, SHA-256, health check และกู้คืนรุ่นเดิมถ้าไม่ผ่าน) ติดตั้งได้เฉพาะรุ่นที่ผู้เผยแพร่เซ็น
+
+| method | params | result |
+|---|---|---|
+| `update.status` | – | สถานะเดียวกับ `GET /api/v1/local/update`: `current_version`, `state` (`idle` · `checking` · `up_to_date` · `update_available` · `downloading` · `applying` · `failed` · `rolled_back` · `disabled` · `not_configured`), `available`, `last_error`, `history`, `web` |
+| `update.check` | – | เริ่มตรวจเบื้องหลังแล้วตอบสถานะทันที — poll `update.status` ต่อ · **เช็กอย่างเดียว**: รุ่นที่พบจากการเช็กนี้ ตัวจับเวลาจะยังไม่ติดตั้งเองแม้เปิด `auto_update` (รอให้รอบตรวจปกติพบก่อน) และไม่เลื่อนรอบตรวจปกติ · build ที่ทำแบบนี้ประกาศ `remote_check_only: true` ใน `update.status` |
+| `update.install` | `{"version"?}` | ไม่ใส่ `version` = ตรวจ release ล่าสุดก่อน (รอผล ใช้ timeout ≥ 60 วินาที) แล้วติดตั้งรุ่นนั้น → `{"started": true, "version", "status"}` · ไม่มีรุ่นใหม่ = `{"started": false, "status"}` |
+
+**เงื่อนไขจบการ poll:** `checking` และ `downloading` ค้างอยู่จนผลของงานนั้นถูกบันทึกแล้ว — เห็น state อื่นเมื่อไหร่
+ฟิลด์ `available` / `last_check_at` / `last_error` ในคำตอบเดียวกันเป็นผลล่าสุดแน่นอน
+
+หลัง `started: true` agent ดาวน์โหลดและส่งให้ตัวติดตั้ง แล้ว service เริ่มใหม่ การเชื่อมต่อหลุดประมาณ 10–40 วินาที
+ให้ client ต่อใหม่แล้วดู `update.status` (`current_version` เปลี่ยน = สำเร็จ, `state: rolled_back`/`failed` + `last_error` = ไม่สำเร็จ)
+error: `-32003` มีงานอัปเดตอื่นอยู่หรือสั่งตรวจถี่เกิน 15 วินาที · `-32602` รุ่นที่ระบุไม่ใช่รุ่นที่ตรวจพบ · agent รุ่นก่อน 0.3.7 ตอบ `-32601`
+
 **กฎ path** (`backend/src/file_access.rs`): ทุก path ถูก `canonicalize` ก่อนใช้ (ตาม symlink, `.`, `..` แล้ว) ·
 path เขียนต้องเป็น absolute, **ห้ามมี `..`**, ห้ามเป็น symlink · ถ้าเปิด agent ด้วย `--file-root <โฟลเดอร์>` (ซ้ำได้)
 ทุก path ที่ canonical แล้วต้องอยู่ใต้ root นั้น ไม่งั้นถูกปฏิเสธ (`-32602` / `400`) — **ไม่ตั้ง `--file-root` = ไม่จำกัดโฟลเดอร์**

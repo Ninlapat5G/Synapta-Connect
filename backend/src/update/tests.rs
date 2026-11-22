@@ -250,6 +250,29 @@ async fn missing_installer_service_is_reported_and_auto_retry_stops_at_the_limit
 }
 
 #[tokio::test]
+async fn remote_check_reports_but_never_lets_the_scheduler_install_until_its_own_round() {
+    let f = fixture();
+    f.publish("0.3.1", b"new");
+    let job = f.mgr.begin_remote_check().unwrap();
+    f.mgr.run_check(job).await;
+    let s = f.status();
+    assert_eq!(s["state"], "update_available");
+    assert_eq!(s["remote_check_only"], true);
+    assert_eq!(f.mgr.auto_install_candidate(), None, "เช็กจากระยะไกลต้องไม่ทำให้ติดตั้งเอง");
+    let st = f.mgr.state.lock().unwrap().clone();
+    assert!(st.last_scheduled_check_at.is_none(), "เช็กจากระยะไกลต้องไม่เลื่อนรอบตรวจปกติ");
+    assert!(st.last_check_at.is_some());
+    // รอบตรวจปกติพบรุ่นเดียวกัน = ติดตั้งตามนโยบายเดิมได้
+    f.mgr.check(false).await.unwrap();
+    assert_eq!(f.mgr.auto_install_candidate().as_deref(), Some("0.3.1"));
+    // รุ่นที่รอบปกติรู้จักแล้ว การเช็กจากระยะไกลไม่ไปพักไว้
+    *f.mgr.last_manual_check.lock().unwrap() = None;
+    let job = f.mgr.begin_remote_check().unwrap();
+    f.mgr.run_check(job).await;
+    assert_eq!(f.mgr.auto_install_candidate().as_deref(), Some("0.3.1"));
+}
+
+#[tokio::test]
 async fn apply_is_refused_for_unknown_version_and_manual_check_is_rate_limited() {
     let f = fixture();
     f.publish("0.3.1", b"new");

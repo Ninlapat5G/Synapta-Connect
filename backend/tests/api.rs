@@ -563,6 +563,17 @@ async fn concurrent_uploads_to_one_destination_are_refused_by_operation_id() {
 }
 
 #[tokio::test]
+async fn paired_device_can_read_update_status_and_is_refused_unknown_versions() {
+    let a = start_paired().await;
+    let status = a.call("update.status", json!({})).await;
+    assert_eq!(status["current_version"], env!("CARGO_PKG_VERSION"));
+    assert!(status.get("web").is_some());
+    // ยังไม่ได้ตรวจพบรุ่นนี้ = ติดตั้งไม่ได้ (กันสั่งติดตั้งรุ่นที่ไม่ได้มาจาก release ที่ตรวจลายเซ็นแล้ว)
+    let r = a.rpc_raw("update.install", json!({"version": "9.9.9"})).await;
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+}
+
+#[tokio::test]
 async fn open_path_lists_roots_folders_and_previews_files() {
     let a = start_paired().await;
     let roots = a.call("file.open_path", json!({})).await;

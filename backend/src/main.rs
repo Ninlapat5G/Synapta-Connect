@@ -32,6 +32,7 @@ fn run(command: Command) -> i32 {
             lan,
             enable_local,
             recover_web,
+            gui,
         } => block_on(async {
             match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web).await {
                 Ok(msg) => {
@@ -40,6 +41,12 @@ fn run(command: Command) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("{e}");
+                    #[cfg(windows)]
+                    if gui {
+                        synapta_connect::platform::win::message_box("Synapta Connect", &e);
+                    }
+                    #[cfg(not(windows))]
+                    let _ = gui;
                     1
                 }
             }

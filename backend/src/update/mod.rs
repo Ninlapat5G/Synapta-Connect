@@ -10,6 +10,7 @@ pub mod error;
 pub mod history;
 pub mod installer;
 pub mod manifest;
+pub mod remote;
 pub mod source;
 pub mod state;
 pub mod version;
@@ -67,6 +68,8 @@ pub enum Refused {
 /// งานที่ผ่านด่านตรวจแล้ว ถือ "ประตู" ไว้จนจบ — ทีละงานเท่านั้น
 pub struct CheckJob {
     manual: bool,
+    /// เช็กจากอุปกรณ์ที่จับคู่ (RPC) — ห้ามมีผลให้ติดตั้ง และไม่นับเป็นรอบตรวจปกติ
+    remote: bool,
     _gate: tokio::sync::OwnedMutexGuard<()>,
 }
 
@@ -135,10 +138,12 @@ impl UpdateManager {
     // ---------- สถานะสำหรับ panel ----------
 
     pub fn status(&self) -> Value {
+        // อ่าน activity ก่อน state เสมอ: งานบันทึก state แล้วค่อยปล่อย activity (run_check/run_apply)
+        // ถ้าเห็น activity ว่างแล้ว state ที่อ่านหลังจากนั้นจึงเป็นผลใหม่แน่นอน — สลับลำดับ = client อ่านเจอผลเก่าได้
+        let activity = *self.activity.lock().unwrap();
         let st = self.state.lock().unwrap().clone();
         let settings = self.settings.get();
         let source = self.source();
-        let activity = *self.activity.lock().unwrap();
         let state = if let Some(a) = activity {
             a
         } else if st.pending.is_some() {
@@ -163,6 +168,8 @@ impl UpdateManager {
             "current_version": self.current(),
             "state": state,
             "auto_update": settings.update.auto_update,
+            // ประกาศว่า RPC update.check ของ build นี้เช็กอย่างเดียวจริง (ไม่ทำให้ติดตั้ง) — SynaptaCode ตรวจก่อนใช้
+            "remote_check_only": true,
             "source": settings.effective_source(),
             "last_check_at": st.last_check_at,
             "available": st.available,
@@ -208,6 +215,15 @@ impl UpdateManager {
     /// ตรวจ release ล่าสุด (ไม่ติดตั้ง) — สองจังหวะ: begin_* ปฏิเสธทันทีถ้าทำไม่ได้, run_* ทำงานจริง
     /// (แยกกันเพื่อให้ panel ได้ 429/409 ทันที แล้วปล่อยงานยาวไปทำเบื้องหลัง)
     pub fn begin_check(&self, manual: bool) -> Result<CheckJob, Refused> {
+        self.begin(manual, false)
+    }
+
+    /// เช็กอย่างเดียวจากอุปกรณ์ที่จับคู่ (RPC update.check) — มีเพดานถี่เหมือนเช็กด้วยมือ ดู UpdateState::remote_found
+    pub fn begin_remote_check(&self) -> Result<CheckJob, Refused> {
+        self.begin(true, true)
+    }
+
+    fn begin(&self, manual: bool, remote: bool) -> Result<CheckJob, Refused> {
         if manual {
             let mut last = self.last_manual_check.lock().unwrap();
             if last.is_some_and(|t| t.elapsed() < MANUAL_CHECK_COOLDOWN) {
@@ -217,7 +233,11 @@ impl UpdateManager {
         }
         let gate = self.busy.clone().try_lock_owned().map_err(|_| Refused::Busy)?;
         self.set_activity(Some("checking"));
-        Ok(CheckJob { manual, _gate: gate })
+        Ok(CheckJob {
+            manual,
+            remote,
+            _gate: gate,
+        })
     }
 
     pub async fn check(&self, manual: bool) -> Result<(), Refused> {
@@ -227,10 +247,8 @@ impl UpdateManager {
     }
 
     pub async fn run_check(&self, job: CheckJob) {
-        let manual = job.manual;
+        let (manual, remote) = (job.manual, job.remote);
         let outcome = self.fetch_verified().await;
-        self.set_activity(None);
-
         let current = self.env.current;
         match outcome {
             Ok((m, _, _)) => {
@@ -244,6 +262,17 @@ impl UpdateManager {
                     .is_some_and(|a| a.version == m.version);
                 self.save(|st| {
                     st.last_check_at = Some(now_secs());
+                    if remote {
+                        // รุ่นที่รอบปกติรู้จักอยู่แล้วติดตั้งตามนโยบายเดิม; รุ่นที่เพิ่งเห็นจากการเช็กนี้ถูกพักไว้
+                        if !newer {
+                            st.remote_found = None;
+                        } else if !was_known {
+                            st.remote_found = Some(m.version.clone());
+                        }
+                    } else {
+                        st.last_scheduled_check_at = Some(now_secs());
+                        st.remote_found = None;
+                    }
                     if st.last_error.as_ref().is_some_and(|e| e.stage == "check") {
                         st.last_error = None; // ตรวจผ่านแล้ว ความผิดจากการตรวจครั้งก่อนไม่เกี่ยวอีก
                     }
@@ -267,6 +296,9 @@ impl UpdateManager {
                 let changed = self.state.lock().unwrap().last_error.as_ref() != Some(&e);
                 self.save(|st| {
                     st.last_check_at = Some(now_secs());
+                    if !remote {
+                        st.last_scheduled_check_at = Some(now_secs());
+                    }
                     st.last_error = Some(e.clone());
                     st.last_error_at = Some(now_secs());
                 });
@@ -276,6 +308,9 @@ impl UpdateManager {
                 }
             }
         }
+        // ปล่อย "checking" หลังบันทึกผลแล้วเท่านั้น — client (SynaptaCode) ถือว่า state ออกจาก checking = ผลตรวจพร้อมอ่าน
+        // (เดิมปล่อยก่อนบันทึก client จึงอาจอ่านเจอสถานะเก่าแล้วสรุปว่าไม่มีรุ่นใหม่) ดูลำดับการอ่านคู่กันใน status()
+        self.set_activity(None);
     }
 
     /// ดาวน์โหลด → ตรวจ → ส่งให้ตัวติดตั้ง; `manual` = เจ้าของสั่ง (เริ่มนับครั้งใหม่)
@@ -314,7 +349,6 @@ impl UpdateManager {
     pub async fn run_apply(&self, job: ApplyJob) {
         let version = job.version.as_str();
         let outcome = self.stage(version).await;
-        self.set_activity(None);
         if let Err(e) = outcome {
             let _ = std::fs::remove_file(self.data_dir.join("settings.pre-update.json"));
             self.save(|st| st.record_failure(version, e.clone()));
@@ -322,6 +356,8 @@ impl UpdateManager {
             self.history
                 .append(&Entry::new(&self.current(), Some(version), "failed").with_error(&e, attempt));
         }
+        // เหตุผลเดียวกับ run_check: บันทึกผล (failed หรือ pending = applying) ก่อนแล้วค่อยปล่อย "downloading"
+        self.set_activity(None);
     }
 
     async fn fetch_verified(&self) -> Result<(manifest::Manifest, Vec<u8>, String), UpdateError> {
@@ -450,6 +486,13 @@ impl UpdateManager {
 
     // ---------- ตัวจับเวลา ----------
 
+    /// รุ่นที่ตัวจับเวลาติดตั้งเองได้ตอนนี้ — ไม่รวมรุ่นที่รู้จากการเช็กจากระยะไกลเท่านั้น
+    fn auto_install_candidate(&self) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        let version = st.available.as_ref()?.version.clone();
+        (st.remote_found.as_deref() != Some(version.as_str())).then_some(version)
+    }
+
     /// ทำงานตลอดอายุ agent (เฉพาะโหมด service): รับผลจากตัวติดตั้ง, ตรวจตามรอบ, ติดตั้งเองถ้าเปิดไว้
     pub async fn run_scheduler(self: Arc<Self>) {
         tokio::time::sleep(Duration::from_secs(120)).await; // ให้ระบบนิ่งหลังบูตก่อนใช้เครือข่าย
@@ -458,20 +501,16 @@ impl UpdateManager {
             tick.tick().await;
             self.ingest_result();
             let settings = self.settings.get();
-            let (last_check, available) = {
-                let st = self.state.lock().unwrap();
-                (st.last_check_at, st.available.clone())
-            };
-            let due = last_check.is_none_or(|t| now_secs() >= t + settings.update.check_interval_hours.max(1) * 3600);
             if !settings.update.auto_update || self.source().is_err() {
                 continue;
             }
-            if due {
+            // นับรอบจากการตรวจตามรอบเท่านั้น (ไม่มีค่า = เพิ่งอัปเกรดจากรุ่นที่ยังไม่บันทึก → ตรวจเลย)
+            let last = self.state.lock().unwrap().last_scheduled_check_at;
+            if last.is_none_or(|t| now_secs() >= t + settings.update.check_interval_hours.max(1) * 3600) {
                 let _ = self.check(false).await;
             }
-            let available = self.state.lock().unwrap().available.clone().or(available);
-            if let Some(a) = available {
-                let _ = self.apply(&a.version, false).await; // ปฏิเสธเองถ้ายังไม่ถึงเวลา/ครบเพดาน
+            if let Some(version) = self.auto_install_candidate() {
+                let _ = self.apply(&version, false).await; // ปฏิเสธเองถ้ายังไม่ถึงเวลา/ครบเพดาน
             }
         }
     }

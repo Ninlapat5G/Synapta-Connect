@@ -1,7 +1,7 @@
 //! ส่วนที่ขึ้นกับ OS: การตั้งค่าโปรเซสตอนเริ่ม (Windows) และการเขียนไฟล์ลับ
 
 #[cfg(windows)]
-pub(crate) mod win {
+pub mod win {
     use std::ffi::c_void;
 
     unsafe extern "system" {
@@ -11,7 +11,25 @@ pub(crate) mod win {
         fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     }
 
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(window: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+
     const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+
+    /// กล่องข้อความแจ้งผิดพลาด — ฟอนต์ระบบแสดงภาษาไทยได้ ต่างจาก console ของ Server 2016 ที่ขึ้นเป็นกล่องสี่เหลี่ยม
+    pub fn message_box(title: &str, text: &str) {
+        const MB_ICONWARNING: u32 = 0x30;
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                wide(text).as_ptr(),
+                wide(title).as_ptr(),
+                MB_ICONWARNING,
+            )
+        };
+    }
 
     pub fn init() {
         // กับดักที่เคยเจอจริง: จอ 1920x1080 ที่ตั้ง scale 125% — โปรเซสที่ไม่ประกาศ DPI-aware จะเห็นจอเป็น

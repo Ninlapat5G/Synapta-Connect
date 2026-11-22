@@ -76,11 +76,13 @@ function Overview({ data, update, navigate, ...controls }) {
 function OpenPanel({ message, notify }) {
   return <Card className="max-w-2xl">
     <SectionTitle icon={ShieldCheck} description={message}>ยืนยันสิทธิ์เข้าหน้าจัดการ</SectionTitle>
-    <div className="inset flex flex-wrap items-center justify-between gap-3 rounded-xl p-3">
+    <p className="text-sm">ดับเบิลคลิกไอคอน <strong>Synapta Connect</strong> บน Desktop หรือใน Start Menu ของเครื่องปลายทาง (ด้วยบัญชีเจ้าของเครื่อง) หน้าจัดการจะเปิดขึ้นพร้อมใช้งานทันที</p>
+    <p className="mt-4 text-sm text-muted">หรือวางคำสั่งนี้ใน PowerShell บนเครื่องปลายทาง</p>
+    <div className="inset mt-2 flex flex-wrap items-center justify-between gap-3 rounded-xl p-3">
       <code className="break-all text-sm">{openCommand}</code>
       <CopyButton text={openCommand} onError={notify} />
     </div>
-    <p className="mt-3 text-sm text-muted">วางคำสั่งใน PowerShell บนเครื่องปลายทาง ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="break-all text-ink">{openCommand} --lan ชื่อเครื่อง</code></p>
+    <p className="mt-3 text-sm text-muted">ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="break-all text-ink">{openCommand} --lan ชื่อเครื่อง</code></p>
   </Card>;
 }
 

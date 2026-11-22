@@ -531,6 +531,7 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
         let _ = run_tool("reg.exe", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
         Ok(())
     });
+    run("shortcuts", &mut crate::shortcut::remove_for_all_users);
     run("data", &mut || {
         if keep_data {
             // เก็บอุปกรณ์ที่จับคู่/กุญแจ host ไว้ใช้ตอนติดตั้งใหม่ — ลบเฉพาะความลับชั่วคราวและงานค้าง

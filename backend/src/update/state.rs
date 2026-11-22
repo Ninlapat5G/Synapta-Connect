@@ -35,7 +35,12 @@ pub struct UpdateState {
     pub last_error: Option<UpdateError>,
     pub last_error_at: Option<u64>,
     pub last_check_at: Option<u64>,
+    /// การตรวจตามรอบ/ของเจ้าของครั้งล่าสุด — ตัวจับเวลานับรอบจากค่านี้ การเช็กจากระยะไกลไม่แตะ จะได้ไม่เลื่อนรอบปกติ
+    pub last_scheduled_check_at: Option<u64>,
     pub available: Option<Available>,
+    /// รุ่นที่รู้จักจากการเช็กจากระยะไกล (RPC update.check) เท่านั้น — ตัวจับเวลายังไม่ติดตั้งเองจนกว่ารอบตรวจปกติจะพบ
+    /// (เช็กจากระยะไกลใช้สิทธิ์ "ดู" จึงต้องไม่กลายเป็นการสั่งติดตั้ง)
+    pub remote_found: Option<String>,
     /// รหัสผลล่าสุดของตัวติดตั้งที่อ่านแล้ว (ไฟล์ผลอยู่ในที่ที่ agent ลบไม่ได้ จึงต้องจำเอง)
     pub seen_result: Option<String>,
     /// ส่งให้ตัวติดตั้งแล้วแต่ยังไม่รู้ผล — เริ่ม agent ใหม่แล้วใช้ตัดสินว่าสำเร็จหรือไม่
@@ -75,6 +80,7 @@ impl UpdateState {
     pub fn record_success(&mut self) {
         *self = UpdateState {
             last_check_at: self.last_check_at,
+            last_scheduled_check_at: self.last_scheduled_check_at,
             seen_result: self.seen_result.take(),
             ..UpdateState::default()
         };

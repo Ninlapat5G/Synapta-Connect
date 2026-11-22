@@ -56,7 +56,10 @@ pub async fn run(
         }
         let url = format!("http://127.0.0.1:{port}{}#code={code}", crate::panel::PATH);
         open_browser(&url)?;
-        return Ok("เปิด panel ในเบราว์เซอร์แล้ว (ลิงก์ใช้ได้ครั้งเดียว 60 วินาที)".into());
+        // พิมพ์ลิงก์ไว้ด้วย: ถ้าเบราว์เซอร์ไม่ขึ้น ยังคัดลอกไปเปิดเองได้
+        return Ok(format!(
+            "เปิด panel ในเบราว์เซอร์แล้ว (ลิงก์ใช้ได้ครั้งเดียว 60 วินาที)\nถ้าเบราว์เซอร์ไม่ขึ้น เปิดลิงก์นี้: {url}"
+        ));
     }
     if !found_secret {
         return Err("อ่าน local_token ไม่ได้ — ต้องเป็นเจ้าของเครื่องที่ตั้งไว้ตอนติดตั้ง (หรือ Administrator)".into());
@@ -108,27 +111,26 @@ async fn control(
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        // Windows Server 2016 ตั้ง Internet Explorer เป็นค่าเริ่มต้น และ IE รันหน้า panel (React) ไม่ได้ — ได้หน้าว่าง
-        // จึงข้าม IE ไปใช้เบราว์เซอร์รุ่นใหม่ที่ติดตั้งไว้ ส่วนเครื่องที่ตั้งเบราว์เซอร์อื่นไว้แล้วใช้ค่าเริ่มต้นตามเดิม
-        if default_browser_is_ie() {
-            let browser = modern_browser().ok_or(
-                "เครื่องนี้มีแค่ Internet Explorer ซึ่งเปิดหน้าจัดการไม่ได้ — ติดตั้ง Chrome, Edge หรือ Firefox \
-                 แล้วรัน `synapta-connect panel` อีกครั้ง",
-            )?;
+        // ใช้เบราว์เซอร์เริ่มต้นเฉพาะเมื่อผู้ใช้เลือกเบราว์เซอร์รุ่นใหม่ไว้จริง ไม่งั้นเปิด Chrome/Edge/Firefox ตรง ๆ
+        // (ดู default_browser_usable — บน Server 2016 ค่าเริ่มต้นใช้ไม่ได้ทั้งแบบ IE และแบบ Edge รุ่นเก่า)
+        if !default_browser_usable() {
+            let Some(browser) = modern_browser() else {
+                if http_handler_is_ie() {
+                    return Err(
+                        "เครื่องนี้มีแค่ Internet Explorer ซึ่งเปิดหน้าจัดการไม่ได้ — ติดตั้ง Chrome, Edge หรือ Firefox \
+                         แล้วรัน `synapta-connect panel` อีกครั้ง"
+                            .into(),
+                    );
+                }
+                return start_default(url);
+            };
             return std::process::Command::new(browser)
                 .arg(url)
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| format!("เปิดเบราว์เซอร์ไม่ได้: {e}"));
         }
-        // `start "" URL` — รหัสเป็น hex ล้วน ไม่มีอักขระที่ cmd ตีความ
-        std::process::Command::new(crate::platform::win::system_tool("cmd.exe"))
-            .args(["/C", "start", "", url])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("เปิดเบราว์เซอร์ไม่ได้: {e}"))
+        start_default(url)
     }
     #[cfg(not(windows))]
     {
@@ -161,16 +163,39 @@ fn registry_value(key: &str, value: Option<&str>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// ผู้ใช้ไม่เคยเลือกเบราว์เซอร์ หรือเลือก IE (ค่าเริ่มต้นของ Server 2016)
+/// `start "" URL` — รหัสเป็น hex ล้วน ไม่มีอักขระที่ cmd ตีความ
 #[cfg(windows)]
-fn default_browser_is_ie() -> bool {
-    let choice = registry_value(
+fn start_default(url: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new(crate::platform::win::system_tool("cmd.exe"))
+        .args(["/C", "start", "", url])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("เปิดเบราว์เซอร์ไม่ได้: {e}"))
+}
+
+/// เบราว์เซอร์เริ่มต้นเปิด panel ได้จริงไหม
+///
+/// บั๊กจริงบน app01 (Server 2016, v0.3.6): UserChoice เป็น `AppXq0fevzme2pys62n3e0fbqa7peapykr8v` (Edge รุ่นเก่าแบบ UWP)
+/// ซึ่งไม่มีบน Server — `start URL` จึงได้หน้าต่าง "How do you want to open this?" แทนเบราว์เซอร์
+/// ผู้ใช้ไม่ทันเลือก รหัส 60 วินาทีก็หมด หน้า panel เลยดูเหมือนคำสั่งยืนยันสิทธิ์ใช้ไม่ได้
+/// จึงนับว่า "ใช้ได้" เฉพาะ ProgId ของเบราว์เซอร์ที่ติดตั้งแบบปกติ (ไม่ใช่ IE และไม่ใช่ AppX)
+#[cfg(windows)]
+fn default_browser_usable() -> bool {
+    match registry_value(
         r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice",
         Some("ProgId"),
-    );
-    choice.is_none_or(|prog_id| prog_id.eq_ignore_ascii_case("IE.HTTP"))
-        && registry_value(r"HKCR\http\shell\open\command", None)
-            .is_none_or(|cmd| cmd.to_lowercase().contains("iexplore"))
+    ) {
+        Some(prog_id) => !prog_id.eq_ignore_ascii_case("IE.HTTP") && !prog_id.to_ascii_lowercase().starts_with("appx"),
+        None => !http_handler_is_ie(),
+    }
+}
+
+/// ตัวเปิด http ของทั้งเครื่องเป็น IE (หรือไม่มี) — ค่าเริ่มต้นของ Server 2016
+#[cfg(windows)]
+fn http_handler_is_ie() -> bool {
+    registry_value(r"HKCR\http\shell\open\command", None).is_none_or(|cmd| cmd.to_lowercase().contains("iexplore"))
 }
 
 /// เบราว์เซอร์รุ่นใหม่ที่ลงทะเบียนใน App Paths (ตัวติดตั้งของเบราว์เซอร์เขียนไว้ทั้งแบบเครื่องและแบบผู้ใช้)

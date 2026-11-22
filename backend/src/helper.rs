@@ -27,6 +27,11 @@ pub async fn run() -> anyhow::Result<()> {
     }
     let data_dir = service_data_dir();
     let token_file = data_dir.join("local_token");
+    // อ่าน token ได้ = เป็นเจ้าของ จึงสร้างไอคอนเปิด panel ให้ (ทำเบื้องหลัง ไม่ให้ช้า helper)
+    #[cfg(windows)]
+    if std::fs::File::open(&token_file).is_ok() {
+        std::thread::spawn(crate::shortcut::ensure_for_current_user);
+    }
     let mut wait = RETRY_MIN;
     loop {
         // อ่านใหม่ทุกรอบ: service สุ่ม token ใหม่ทุกครั้งที่เริ่ม
