@@ -265,6 +265,19 @@ function App({ code }) {
   </div>;
 }
 
+function PanelEntry() {
+  const [code, setCode] = useState(readOpeningCode);
+  useEffect(() => {
+    function openLink() {
+      const next = readOpeningCode();
+      if (next) setCode(next);
+    }
+    window.addEventListener('hashchange', openLink);
+    return () => window.removeEventListener('hashchange', openLink);
+  }, []);
+  return <App key={code} code={code} />;
+}
+
 createRoot(document.getElementById('root')).render(
-  <LazyMotion features={domAnimation} strict><App code={readOpeningCode()} /></LazyMotion>,
+  <LazyMotion features={domAnimation} strict><PanelEntry /></LazyMotion>,
 );

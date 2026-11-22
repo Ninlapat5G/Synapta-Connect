@@ -81,6 +81,6 @@ export function formatDate(value) {
 
 export function readOpeningCode() {
   const code = new URLSearchParams(location.hash.slice(1)).get('code');
-  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  if (code !== null) history.replaceState(null, '', location.pathname + location.search);
   return code;
 }
