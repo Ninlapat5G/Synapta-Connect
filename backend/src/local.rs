@@ -74,6 +74,24 @@ fn management(app: App) -> Router<App> {
         .layer(middleware::from_fn_with_state(app, token_guard))
 }
 
+#[cfg(windows)]
+pub(crate) fn desktop_router(app: App) -> Router {
+    management(app.clone())
+        .route("/api/v1/local/health", get(health))
+        .route("/api/v1/local/recover-web", post(recover_web))
+        .route("/api/v1/local/restart-web", post(restart_web))
+        .layer(Extension(Scope::Local))
+        .with_state(app)
+}
+
+#[cfg(windows)]
+async fn restart_web(State(app): State<App>) -> Response {
+    match app.network.restart_panel().await {
+        Ok(()) => Json(network_json(&app)).into_response(),
+        Err(message) => error(StatusCode::SERVICE_UNAVAILABLE, "web_restart_failed", &message),
+    }
+}
+
 fn panel_routes(app: App) -> Router<App> {
     Router::new()
         .route("/api/v1/panel/exchange", post(panel_exchange))
@@ -366,6 +384,7 @@ fn network_json(app: &App) -> Value {
         "local_enabled": state.local_enabled, "lan_enabled": state.lan_enabled,
         "lan_ready": app.network.lan.is_some(),
         "lan_hosts": app.network.lan.as_ref().map_or(&[][..], |lan| &lan.hosts[..]),
+        "web_listener": app.network.panel_health(),
     })
 }
 

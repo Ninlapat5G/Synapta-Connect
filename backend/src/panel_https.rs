@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
@@ -95,8 +95,13 @@ pub struct ListenerPort(pub u16);
 pub async fn serve(listener: TcpListener, local: Router, lan: Router, app: App, port: u16) {
     let lan_slots = Arc::new(crate::tls::PreAuth::default());
     let local_slots = Arc::new(Semaphore::new(32));
+    let mut connections = JoinSet::new();
     loop {
-        let Ok((tcp, peer)) = listener.accept().await else {
+        let accepted = tokio::select! {
+            result = listener.accept() => result,
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let Ok((tcp, peer)) = accepted else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
@@ -106,7 +111,7 @@ pub async fn serve(listener: TcpListener, local: Router, lan: Router, app: App, 
                 continue;
             };
             let local = local.clone().layer(context);
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let _slot = slot;
                 serve_http(tcp, local, true).await;
             });
@@ -121,7 +126,7 @@ pub async fn serve(listener: TcpListener, local: Router, lan: Router, app: App, 
             };
             let acceptor = server.acceptor.clone();
             let lan = lan.clone().layer(context);
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let _slot = slot;
                 if let Ok(Ok(tls)) = timeout(Duration::from_secs(5), acceptor.accept(tcp)).await {
                     let _ = timeout(Duration::from_secs(30), serve_http(tls, lan, false)).await;

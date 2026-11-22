@@ -38,6 +38,14 @@ function Copy-Notices([string]$Destination) {
         $license = Get-Content -LiteralPath (Join-Path $Frontend "node_modules/$name/LICENSE") -Raw
         Add-Content -LiteralPath $notice -Encoding UTF8 -Value ("`r`n=== " + $name + " ===`r`n" + $license)
     }
+    foreach ($name in 'motion', 'framer-motion', 'motion-dom', 'motion-utils') {
+        $license = Get-Content -LiteralPath (Join-Path $Frontend "node_modules/$name/LICENSE.md") -Raw
+        Add-Content -LiteralPath $notice -Encoding UTF8 -Value ("`r`n=== " + $name + " ===`r`n" + $license)
+    }
+    foreach ($file in 'LICENSE-MIT', 'LICENSE-APACHE-2.0') {
+        $license = Get-Content -LiteralPath (Join-Path $Frontend "node_modules/@tauri-apps/api/$file") -Raw
+        Add-Content -LiteralPath $notice -Encoding UTF8 -Value ("`r`n=== @tauri-apps/api " + $file + " ===`r`n" + $license)
+    }
     foreach ($name in 'LICENSE-Anuphan', 'LICENSE-Chakra') {
         $license = Get-Content -LiteralPath (Join-Path $Frontend "assets/fonts/$name") -Raw -Encoding UTF8
         Add-Content -LiteralPath $notice -Encoding UTF8 -Value ("`r`n=== " + $name + " ===`r`n" + $license)
@@ -62,7 +70,8 @@ try {
     try {
         if ($BuildBackend) {
             if ((& rustc -vV | Out-String) -notmatch 'host: x86_64-pc-windows-msvc') { throw 'Backend release requires the Windows x64 MSVC Rust toolchain.' }
-            Invoke-Checked 'cargo' @('build', '--release', '--locked')
+            Invoke-Checked 'npm.cmd' @('--prefix', $Frontend, 'run', 'build:desktop')
+            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--features', 'desktop')
         } elseif ($SigningKey -and !$ReleaseTool) {
             Invoke-Checked 'cargo' @('build', '--release', '--locked', '--bin', 'synapta-release')
         }

@@ -6,6 +6,8 @@ pub mod auth;
 pub mod browse;
 pub mod cli;
 pub mod config;
+#[cfg(windows)]
+pub mod desktop_ipc;
 pub mod discovery;
 pub mod display;
 pub mod exec;
@@ -53,6 +55,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
 /// รัน agent จนกว่า `shutdown` จะเสร็จ (service ใช้สัญญาณหยุดจาก SCM)
 pub async fn run_until(config: Config, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let app = app::AppState::new(config)?;
     #[cfg(windows)]
     legacy_pty::set_data_dir(&app.config.data_dir);
@@ -71,11 +74,18 @@ pub async fn run_until(config: Config, shutdown: impl Future<Output = ()>) -> an
         }
     }
 
+    let control = async {
+        #[cfg(windows)]
+        if app.config.mode == Mode::Service {
+            desktop_ipc::serve(app.clone()).await;
+        }
+        std::future::pending::<()>().await;
+    };
     tokio::select! {
-        _ = listeners.supervise(app) => {}
-        _ = shutdown => {}
+        result = listeners.supervise(app.clone()) => result,
+        _ = control => unreachable!(),
+        _ = shutdown => Ok(()),
     }
-    Ok(())
 }
 
 fn announce_console(app: &app::App) {

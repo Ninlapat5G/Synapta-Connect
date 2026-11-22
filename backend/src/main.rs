@@ -1,6 +1,9 @@
 use synapta_connect::cli::{self, Command};
 use tracing_subscriber::EnvFilter;
 
+#[cfg(all(windows, feature = "desktop"))]
+mod desktop;
+
 fn main() {
     let command = cli::parse(std::env::args().skip(1).collect()).unwrap_or_else(|e| {
         eprintln!("{e}\n\n{}", cli::USAGE);
@@ -27,36 +30,62 @@ fn run(command: Command) -> i32 {
                 }
             }
         }),
+        Command::Desktop => launch_desktop(),
         Command::Panel {
             local_port,
             lan,
             enable_local,
             recover_web,
             gui,
-        } => block_on(async {
-            match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web).await {
-                Ok(msg) => {
-                    println!("{msg}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    #[cfg(windows)]
-                    if gui {
-                        synapta_connect::platform::win::message_box("Synapta Connect", &e);
-                    }
-                    #[cfg(not(windows))]
-                    let _ = gui;
-                    1
-                }
+        } => {
+            #[cfg(all(windows, feature = "desktop"))]
+            if gui && local_port.is_none() && lan.is_none() && !enable_local && !recover_web {
+                return launch_desktop();
             }
-        }),
+            block_on(async {
+                match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web).await {
+                    Ok(msg) => {
+                        println!("{msg}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        #[cfg(windows)]
+                        if gui {
+                            synapta_connect::platform::win::message_box("Synapta Connect", &e);
+                        }
+                        #[cfg(not(windows))]
+                        let _ = gui;
+                        1
+                    }
+                }
+            })
+        }
         Command::Helper => block_on(async {
             synapta_connect::platform::init(); // DPI เหมือน agent: ภาพกับเมาส์ต้องใช้พิกเซลเดียวกัน
             synapta_connect::helper::run().await.map_or(1, |_| 0)
         }),
         other => windows_only(other),
     }
+}
+
+fn launch_desktop() -> i32 {
+    #[cfg(all(windows, feature = "desktop"))]
+    {
+        match desktop::run() {
+            Ok(()) => return 0,
+            Err(error) => {
+                eprintln!("{error}");
+                synapta_connect::platform::win::message_box(
+                    "Synapta Connect",
+                    &format!("เปิด Desktop ไม่สำเร็จ: {error}\nลองเปิด Web Panel ด้วยคำสั่ง synapta-connect panel"),
+                );
+            }
+        }
+    }
+    #[cfg(not(all(windows, feature = "desktop")))]
+    eprintln!("รุ่นนี้ไม่มี Synapta Connect Desktop ให้ใช้คำสั่ง synapta-connect panel");
+    1
 }
 
 fn block_on(future: impl std::future::Future<Output = i32>) -> i32 {
@@ -77,6 +106,7 @@ fn windows_only(command: Command) -> i32 {
     match command {
         Command::ServiceRun => winsvc::run_agent_service().map_or_else(service_start_error, |_| 0),
         Command::UpdaterRun => winsvc::run_updater_service().map_or_else(service_start_error, |_| 0),
+        Command::Watchdog => report(winsvc::watchdog()),
         Command::Install { options, plan_only } => {
             if plan_only {
                 for (step, detail) in install::plan(&options) {

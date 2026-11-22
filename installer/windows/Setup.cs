@@ -665,26 +665,20 @@ internal sealed class SetupForm : Form
         });
     }
 
-    /// `synapta-connect panel` ด้วยบัญชีปกติ — ข้อความผิดพลาด (เช่น เครื่องมีแค่ IE) แสดงในหน้าต่างนี้
-    private async void OpenPanel()
+    private void OpenPanel()
     {
-        status.ForeColor = Theme.Muted;
-        status.Text = "กำลังเปิดหน้าจัดการในเบราว์เซอร์...";
-        var result = await Task.Run(() =>
+        try
         {
-            string log;
-            try { return Tuple.Create(Setup.RunHidden(Setup.InstalledExe, "panel", out log), log); }
-            catch (Exception error) { return Tuple.Create(1, error.Message); }
-        });
-        if (IsDisposed) return;
-        status.ForeColor = result.Item1 == 0 ? Theme.Good : Theme.Danger;
-        status.Text = result.Item1 == 0 ? "เปิดหน้าจัดการแล้ว ลิงก์ใช้ได้ครั้งเดียวภายใน 60 วินาที" : LastLine(result.Item2);
-    }
-
-    private static string LastLine(string text)
-    {
-        string[] lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-        return lines.Length == 0 ? "เปิดหน้าจัดการไม่สำเร็จ" : lines[lines.Length - 1];
+            using (Process.Start(new ProcessStartInfo(Setup.InstalledExe, "panel --gui")
+                { UseShellExecute = false, CreateNoWindow = true })) { }
+            status.ForeColor = Theme.Good;
+            status.Text = "กำลังเปิด Synapta Connect Desktop...";
+        }
+        catch (Exception error)
+        {
+            status.ForeColor = Theme.Danger;
+            status.Text = error.Message;
+        }
     }
 
     private static NumericUpDown Port(int value)

@@ -16,6 +16,8 @@
 
 หน้า panel ต้องใช้ Chrome, Edge หรือ Firefox — Server 2016 มีแค่ Internet Explorer มาให้ คำสั่ง `panel` จะข้าม IE ไปใช้เบราว์เซอร์รุ่นใหม่ที่ติดตั้งไว้ ถ้าไม่มีจะบอกให้ติดตั้งก่อน
 
+Synapta Connect Desktop ใช้ Microsoft Edge WebView2 Runtime บน Windows ที่มีเดสก์ท็อป เครื่อง Server Core ใช้ CLI และ Agent ตามเดิม ส่วนเครื่องที่ยังไม่มี Runtime ให้ติดตั้ง [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) หรือเปิด Web Panel ในเบราว์เซอร์ด้วย `synapta-connect.exe panel`
+
 Windows Service เสิร์ฟเว็บสำรองที่ฝังมากับ Agent จึงเปิดใช้งานครั้งแรกได้ทันทีที่ `http://localhost:52402/synaptaconnect` เครื่องปลายทางไม่ต้องมี Node.js, npm หรือ Rust
 
 | ค่า | เริ่มต้น | ใช้กับ |
@@ -44,7 +46,7 @@ LAN ใช้ IPv4 ช่วง private บน subnet เดียวกัน�
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ```
 
-ใช้ `-Component Backend` หรือ `-Component Panel` เพื่อทำเฉพาะส่วนที่ต้องการ เวอร์ชันของแต่ละส่วนอยู่ใน `backend/Cargo.toml` และ `frontend/package.json` ตามลำดับ เว็บสำรองของ backend ใช้เวอร์ชันที่ build มาด้วย
+ใช้ `-Component Backend` หรือ `-Component Panel` เพื่อทำเฉพาะส่วนที่ต้องการ เวอร์ชันของแต่ละส่วนอยู่ใน `backend/Cargo.toml` และ `frontend/package.json` ตามลำดับ ตัว build Backend ฝังไฟล์ Desktop ที่ build ด้วย `npm run build:desktop` และเว็บสำรองในไบนารีชุดเดียวกับ Agent เมื่ออัปเดต Agent ให้เปิด Desktop ใหม่เพื่อใช้หน้าจอรุ่นล่าสุด
 
 เมื่อมีคีย์ของผู้เผยแพร่ ให้เพิ่ม `-SigningKey <ไฟล์คีย์นอก repo> -PublicKey <Ed25519 hex>` สคริปต์ฝัง public key ใน backend เซ็นแต่ละ manifest และตรวจไฟล์ที่สร้างซ้ำ ใช้ `-ReleaseTool <synapta-release.exe>` กับ `-Component Panel` เพื่อเซ็นด้วยเครื่องมือที่ build มาแล้ว
 
@@ -62,6 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 - Backend ตรวจ Ed25519 ของ manifest, แพลตฟอร์ม Windows x64, ขนาด, SHA-256 และเลขรุ่น ตัวติดตั้งตรวจซ้ำก่อนสลับ แล้วใช้ health check ที่พิสูจน์ด้วย HMAC เพื่อยืนยันรุ่นใหม่ หากไม่ผ่านจะกู้ไบนารีรุ่นเดิม
 - เว็บตรวจ Ed25519, ขนาด, SHA-256, เลขรุ่น และ Panel API รุ่นเดียวกับที่ backend รองรับ ระบบตรวจไฟล์ที่ `index.html` อ้างถึงก่อนเปิดใช้และรักษาเว็บเดิมหากดาวน์โหลดหรือตรวจสอบไม่สำเร็จ
 - ตอนเริ่ม Agent ถ้าแพ็กเกจเว็บบนดิสก์เสียหรือใช้กับ backend รุ่นนั้นไม่ได้ ระบบเลือกเว็บก่อนหน้าที่ตรวจผ่านหรือเว็บฝัง สามารถกด **กู้คืนเว็บ** จากหน้าอัปเดต หรือเรียก `synapta-connect.exe panel --recover-web` จากเครื่องปลายทางหากหน้าเว็บเปิดไม่ขึ้น
+- Desktop จัดการ Windows Service ผ่าน SCM และจัดการ Web Panel ผ่าน named pipe ในเครื่องที่ยืนยันตัวตนสองทาง Windows ลองเริ่ม Agent หลังล่มแบบจำกัดจำนวนครั้ง และงาน `SynaptaConnect Health Monitor` ตรวจกรณีที่ service ยังขึ้นว่า Running แต่หยุดตอบ
 
 ---
 

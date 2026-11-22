@@ -26,6 +26,7 @@ pub enum Command {
     Agent(Config),
     ServiceRun,
     UpdaterRun,
+    Watchdog,
     Install {
         options: InstallOptions,
         plan_only: bool,
@@ -43,6 +44,7 @@ pub enum Command {
     ServiceStatus {
         json: bool,
     },
+    Desktop,
     /// เปิดหน้าจัดการในเบราว์เซอร์ (ไม่ต้องใช้สิทธิ์ admin ขอแค่เป็นเจ้าของเครื่อง)
     Panel {
         local_port: Option<u16>,
@@ -68,6 +70,7 @@ pub const USAGE: &str = "การใช้งาน:
   synapta-connect upgrade [--json]
       ใช้ไฟล์นี้แทนรุ่นที่ติดตั้งไว้ โดยคงการจับคู่และค่าตั้ง (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect service start|stop|status [--json]
+  synapta-connect desktop
   synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web] [--gui]
   synapta-connect --version";
 
@@ -78,6 +81,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
     let rest = &args[1..];
     match first {
         "--version" | "version" => Ok(Command::Version),
+        "desktop" if rest.is_empty() => Ok(Command::Desktop),
         "service" => match rest.first().map(String::as_str) {
             Some("run") => Ok(Command::ServiceRun),
             Some("start") => Ok(Command::ServiceStart),
@@ -88,6 +92,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             _ => Err("service ต้องตามด้วย run | start | stop | status".into()),
         },
         "updater" if rest.first().map(String::as_str) == Some("run") => Ok(Command::UpdaterRun),
+        "watchdog" if rest.is_empty() => Ok(Command::Watchdog),
         "helper" => Ok(Command::Helper),
         "panel" => {
             let mut port = None;

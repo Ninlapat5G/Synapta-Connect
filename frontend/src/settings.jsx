@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Globe, Monitor, Network, Radio, Settings2, Terminal } from 'lucide-react';
-import { routes } from './api';
+import { desktop, routes } from './api';
 import { Button, Card, CopyButton, Field, SectionTitle, Toggle } from './ui';
 
 const portFields = [
@@ -30,7 +30,7 @@ export function NetworkSettings({ network, disabled, action, confirm }) {
   const change = (key, value) => setDraft({ ...next, [key]: value });
   const valid = portsValid(next);
   const changedPort = portFields.some(([key]) => Number(next[key]) !== network[key]);
-  const currentChannelEnabled = location.protocol === 'https:' ? next.lan_enabled : next.local_enabled;
+  const currentChannelEnabled = desktop || (location.protocol === 'https:' ? next.lan_enabled : next.local_enabled);
 
   function save() {
     const body = Object.fromEntries(portFields.map(([key]) => [key, Number(next[key])]));
@@ -39,7 +39,7 @@ export function NetworkSettings({ network, disabled, action, confirm }) {
     const run = async () => {
       const result = await action(routes.network, 'PUT', body, 'บันทึกการตั้งค่าเครือข่ายแล้ว');
       if (!result) return;
-      if (result.code) {
+      if (!desktop && result.code) {
         const target = new URL('/synaptaconnect/', location.href);
         target.port = body.local_port;
         target.hash = 'code=' + result.code;
@@ -53,7 +53,7 @@ export function NetworkSettings({ network, disabled, action, confirm }) {
         title: 'ใช้การตั้งค่าเครือข่ายใหม่',
         text: !currentChannelEnabled
           ? 'ช่องทางที่กำลังใช้อยู่จะถูกปิด หากต้องการเปิด localhost กลับ ให้รัน & "$env:ProgramFiles\\SynaptaConnect\\synapta-connect.exe" panel --enable-local ใน PowerShell บนเครื่องที่ติดตั้ง'
-          : 'เครื่องที่กำลังเชื่อมต่ออาจต้องใช้พอร์ตใหม่ และหน้าจัดการจะย้ายไปพอร์ตใหม่เมื่อบันทึกสำเร็จ',
+          : desktop ? 'เครื่องที่กำลังเชื่อมต่ออาจต้องใช้พอร์ตใหม่' : 'เครื่องที่กำลังเชื่อมต่ออาจต้องใช้พอร์ตใหม่ และหน้าจัดการจะย้ายไปพอร์ตใหม่เมื่อบันทึกสำเร็จ',
         label: 'บันทึกและใช้ค่าใหม่',
         run,
       });

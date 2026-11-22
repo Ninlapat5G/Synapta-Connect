@@ -1,9 +1,10 @@
 use crate::{app::App, config::Ports, discovery, local, panel_https, settings::NetworkSettings, tls};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     net::Ipv4Addr,
     path::Path,
     sync::{Arc, OnceLock, RwLock},
+    time::{Duration, Instant},
 };
 use tokio::{
     net::{TcpListener, UdpSocket},
@@ -24,11 +25,22 @@ pub struct Network {
     pub lan: Option<panel_https::Server>,
     commands: OnceLock<mpsc::Sender<Change>>,
     panel_port: watch::Sender<u16>,
+    panel_health: RwLock<PanelHealth>,
 }
 
-struct Change {
-    next: NetworkRequest,
-    reply: oneshot::Sender<Result<(), String>>,
+#[derive(Clone, Default, Serialize)]
+pub struct PanelHealth {
+    ready: bool,
+    attempts: u32,
+    error: Option<String>,
+}
+
+type NetworkReply = oneshot::Sender<Result<(), String>>;
+
+enum Change {
+    Configure(NetworkRequest, NetworkReply),
+    #[cfg(windows)]
+    RestartPanel(NetworkReply),
 }
 
 impl Network {
@@ -50,6 +62,7 @@ impl Network {
             lan,
             commands: OnceLock::new(),
             panel_port: watch::channel(ports.local_port).0,
+            panel_health: RwLock::new(PanelHealth::default()),
         })
     }
 
@@ -61,16 +74,31 @@ impl Network {
         self.panel_port.subscribe()
     }
 
+    pub fn panel_health(&self) -> PanelHealth {
+        self.panel_health.read().unwrap().clone()
+    }
+
+    fn set_panel_health(&self, ready: bool, attempts: u32, error: Option<String>) {
+        *self.panel_health.write().unwrap() = PanelHealth { ready, attempts, error };
+    }
+
     pub async fn change(&self, next: NetworkRequest) -> Result<(), String> {
         next.ports.validate()?;
         if next.lan_enabled && self.lan.is_none() {
             return Err("ต้องติดตั้งใบรับรอง HTTPS และคีย์ที่ใช้ได้ก่อนเปิด LAN".into());
         }
+        self.send(|reply| Change::Configure(next, reply)).await
+    }
+
+    #[cfg(windows)]
+    pub async fn restart_panel(&self) -> Result<(), String> {
+        self.send(Change::RestartPanel).await
+    }
+
+    async fn send(&self, change: impl FnOnce(NetworkReply) -> Change) -> Result<(), String> {
         let sender = self.commands.get().ok_or("ตัวฟังเครือข่ายยังไม่พร้อม")?;
         let (reply, result) = oneshot::channel();
-        sender
-            .try_send(Change { next, reply })
-            .map_err(|_| "กำลังใช้ค่าเครือข่ายอื่นอยู่")?;
+        sender.try_send(change(reply)).map_err(|_| "กำลังใช้ค่าเครือข่ายอื่นอยู่")?;
         result.await.map_err(|_| "ตัวฟังเครือข่ายหยุดทำงาน")?
     }
 }
@@ -80,6 +108,13 @@ struct Task(JoinHandle<()>);
 impl Drop for Task {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+impl Task {
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
     }
 }
 
@@ -157,10 +192,13 @@ fn bind_exclusive(address: Ipv4Addr, port: u16, kind: socket2::Type) -> std::io:
 
 pub struct Listeners {
     agent: Task,
-    panel: Task,
+    panel: Option<Task>,
     discovery: discovery::Discovery,
     agent_tls: Arc<rustls::ServerConfig>,
     changes: mpsc::Receiver<Change>,
+    panel_attempts: u32,
+    panel_failures: u32,
+    panel_retry_after: Instant,
 }
 
 impl Listeners {
@@ -171,13 +209,24 @@ impl Listeners {
             discovery_port,
         } = app.network.state().ports;
         let agent_socket = bind_tcp(Ipv4Addr::UNSPECIFIED, port).await?;
-        let panel_socket = bind_panel(app, local_port).await?;
+        let panel_socket = match bind_panel(app, local_port).await {
+            Ok(socket) => Some(socket),
+            Err(error) if app.config.mode == crate::config::Mode::Service => {
+                tracing::warn!(port = local_port, %error, "Web Panel unavailable at startup");
+                app.network.set_panel_health(false, 0, Some(error.to_string()));
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
         let udp = bind_discovery(discovery_port)
             .await
             .inspect_err(|e| tracing::warn!("เปิด UDP {discovery_port} ไม่ได้: {e}"))
             .ok();
         let agent_tls = tls::server_config(app)?;
-        let local_port = panel_socket.local_addr()?.port();
+        let local_port = match &panel_socket {
+            Some(socket) => socket.local_addr()?.port(),
+            None => local_port,
+        };
         {
             let mut current = app.network.state.write().unwrap();
             current.ports.local_port = local_port;
@@ -188,21 +237,119 @@ impl Listeners {
         }
         app.network.panel_port.send_replace(local_port);
         publish_panel_port(app, local_port)?;
+        if panel_socket.is_some() {
+            app.network.set_panel_health(true, 0, None);
+        }
         let (sender, changes) = mpsc::channel(1);
         let _ = app.network.commands.set(sender);
         Ok(Self {
             agent: agent(app, agent_socket, &agent_tls),
-            panel: panel(app, panel_socket, local_port),
+            panel: panel_socket.map(|socket| panel(app, socket, local_port)),
             discovery: discovery::start_with_socket(app, udp),
             agent_tls,
             changes,
+            panel_attempts: 0,
+            panel_failures: 0,
+            panel_retry_after: Instant::now(),
         })
     }
 
-    pub async fn supervise(mut self, app: App) {
-        while let Some(change) = self.changes.recv().await {
-            let result = self.apply(&app, change.next).await;
-            let _ = change.reply.send(result);
+    pub async fn supervise(mut self, app: App) -> anyhow::Result<()> {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(2))
+            .build()?;
+        loop {
+            tokio::select! {
+                result = &mut self.agent.0 => anyhow::bail!("Agent listener exited: {result:?}"),
+                change = self.changes.recv() => match change {
+                    Some(Change::Configure(next, reply)) => {
+                        let _ = reply.send(self.apply(&app, next).await);
+                    }
+                    #[cfg(windows)]
+                    Some(Change::RestartPanel(reply)) => {
+                        self.panel_attempts = 0;
+                        let _ = reply.send(self.restart_panel(&app).await);
+                    }
+                    None => anyhow::bail!("Network control channel closed"),
+                },
+                _ = tick.tick() => self.check_panel(&app, &client).await,
+            }
+        }
+    }
+
+    async fn check_panel(&mut self, app: &App, client: &reqwest::Client) {
+        if self.panel.is_some() {
+            let port = app.network.state().ports.local_port;
+            let nonce = crate::hex::random_id(16);
+            let url = format!("http://127.0.0.1:{port}/api/v1/local/health?nonce={nonce}");
+            let healthy = async {
+                let reply = client
+                    .get(url)
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()?;
+                let version = reply["version"].as_str()?;
+                let pid = u32::try_from(reply["pid"].as_u64()?).ok()?;
+                let mac = reply["proof"].as_str()?;
+                Some(
+                    pid == std::process::id()
+                        && crate::proof::check(
+                            &app.local_token,
+                            crate::proof::HEALTH,
+                            &crate::proof::health_message(&nonce, version, pid),
+                            mac,
+                        ),
+                )
+            }
+            .await
+                == Some(true);
+            if healthy {
+                self.panel_failures = 0;
+                self.panel_attempts = 0;
+                app.network.set_panel_health(true, 0, None);
+                return;
+            }
+            self.panel_failures += 1;
+            if self.panel_failures < 3 && !self.panel.as_ref().is_some_and(|task| task.0.is_finished()) {
+                return;
+            }
+            app.network
+                .set_panel_health(false, self.panel_attempts, Some("Web Panel ไม่ตอบการตรวจสุขภาพ".into()));
+        }
+        if self.panel_attempts < 5 && Instant::now() >= self.panel_retry_after {
+            self.panel_attempts += 1;
+            let _ = self.restart_panel(app).await;
+        }
+    }
+
+    async fn restart_panel(&mut self, app: &App) -> Result<(), String> {
+        if let Some(task) = self.panel.take() {
+            task.stop().await;
+        }
+        self.panel_failures = 0;
+        let port = app.network.state().ports.local_port;
+        match bind_panel(app, port).await {
+            Ok(socket) => {
+                self.panel = Some(panel(app, socket, port));
+                app.network.set_panel_health(true, self.panel_attempts, None);
+                tracing::info!(port, "Web Panel restarted");
+                Ok(())
+            }
+            Err(error) => {
+                let message = format!("เปิดพอร์ต Web Panel {port} ไม่ได้: {error}");
+                app.network
+                    .set_panel_health(false, self.panel_attempts, Some(message.clone()));
+                self.panel_retry_after = Instant::now() + Duration::from_secs(5 * (1 << self.panel_attempts.min(4)));
+                tracing::warn!(port, %error, "Web Panel restart failed");
+                Err(message)
+            }
         }
     }
 
@@ -265,7 +412,10 @@ impl Listeners {
             self.agent = self::agent(app, socket, &self.agent_tls);
         }
         if let Some(socket) = panel {
-            self.panel = self::panel(app, socket, next.ports.local_port);
+            self.panel = Some(self::panel(app, socket, next.ports.local_port));
+            self.panel_attempts = 0;
+            self.panel_failures = 0;
+            app.network.set_panel_health(true, 0, None);
             app.network.panel_port.send_replace(next.ports.local_port);
         }
         if let Some(socket) = udp {
@@ -285,4 +435,38 @@ fn publish_panel_port(app: &App, port: u16) -> std::io::Result<()> {
         port.to_string().as_bytes(),
         &readers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn service_keeps_its_agent_port_when_the_panel_port_is_occupied() {
+        let blocked = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_port = blocked.local_addr().unwrap().port();
+        let data_dir = std::env::temp_dir().join(format!("synapta-web-recovery-{}", crate::hex::random_id(8)));
+        let config = crate::config::Config {
+            mode: crate::config::Mode::Service,
+            data_dir: data_dir.clone(),
+            port: 0,
+            discovery_port: 0,
+            local_port,
+            ..crate::config::Config::default()
+        };
+        let app = crate::app::AppState::new(config).unwrap();
+        let mut listeners = Listeners::start(&app).await.unwrap();
+        assert!(!app.network.panel_health().ready);
+        let agent_port = app.network.state().ports.port;
+        assert_ne!(agent_port, 0);
+        assert!(!listeners.agent.0.is_finished());
+
+        drop(blocked);
+        listeners.restart_panel(&app).await.unwrap();
+        assert!(app.network.panel_health().ready);
+        assert_eq!(app.network.state().ports.port, agent_port);
+        drop(listeners);
+        drop(app);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 }

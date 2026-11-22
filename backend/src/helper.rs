@@ -50,7 +50,8 @@ pub async fn run() -> anyhow::Result<()> {
                 wait = (wait * 2).min(RETRY_MAX);
             }
         }
-        tokio::time::sleep(wait).await;
+        let jitter = Duration::from_millis(u64::from(rand::random::<u16>() % 1000));
+        tokio::time::sleep(wait + jitter).await;
     }
 }
 
@@ -64,7 +65,8 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
     request
         .headers_mut()
         .insert("x-synapta-proof", proof::make(token, proof::HELPER, &nonce).parse()?);
-    let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+    let (socket, response) =
+        tokio::time::timeout(Duration::from_secs(8), tokio_tungstenite::connect_async(request)).await??;
     let server_proof = response
         .headers()
         .get("x-synapta-server-proof")

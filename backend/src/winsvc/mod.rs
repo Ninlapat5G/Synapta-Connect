@@ -7,6 +7,8 @@
 
 mod host;
 pub mod install;
+mod watchdog;
+pub use watchdog::watchdog;
 
 use crate::{
     config::{Config, service_data_dir},
@@ -26,13 +28,57 @@ pub fn stop_agent() -> Result<(), String> {
     host::stop_service(AGENT_SERVICE)
 }
 
+pub fn desktop_status() -> serde_json::Value {
+    use windows_service::service::ServiceAccess;
+    let state = |name| match host::service_exists(name) {
+        Ok(false) => "NotInstalled".into(),
+        Err(_) => "Unavailable".into(),
+        Ok(true) => host::open(name, ServiceAccess::QUERY_STATUS)
+            .and_then(|service| host::state_of(&service))
+            .map(|state| format!("{state:?}"))
+            .unwrap_or_else(|_| "Unavailable".into()),
+    };
+    serde_json::json!({
+        "agent": state(AGENT_SERVICE),
+        "updater": state(UPDATER_SERVICE),
+        "can_start": host::open(AGENT_SERVICE, ServiceAccess::START | ServiceAccess::QUERY_STATUS).is_ok(),
+        "can_stop": host::open(AGENT_SERVICE, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS).is_ok(),
+        "account": crate::platform::account(),
+        "desktop_version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+pub fn desktop_control(action: &str) -> Result<(), String> {
+    use windows_service::service::ServiceAccess;
+    if let Ok(service) = host::open(UPDATER_SERVICE, ServiceAccess::QUERY_STATUS)
+        && host::state_of(&service)? != ServiceState::Stopped
+    {
+        return Err("กำลังใช้ตัวติดตั้งอัปเดต กรุณารอให้ทำงานเสร็จก่อน".into());
+    }
+    match action {
+        "start" => start_agent(),
+        "stop" => stop_agent(),
+        "restart" => {
+            host::open(
+                AGENT_SERVICE,
+                ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+            )?;
+            stop_agent()?;
+            start_agent()
+        }
+        _ => return Err("คำสั่งควบคุม Agent ไม่ถูกต้อง".into()),
+    }?;
+    tracing::info!(%action, account = ?crate::platform::account(), "Desktop service control");
+    Ok(())
+}
+
 pub fn firewall_ready(data_dir: &Path) -> bool {
     data_dir.join("updater-status").join(install::FIREWALL_MARKER).is_file()
 }
 
 pub async fn migrate_firewall(data_dir: PathBuf) {
     for _ in 0..6 {
-        if firewall_ready(&data_dir) {
+        if firewall_ready(&data_dir) && install::recovery_ready(&data_dir) {
             return;
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
@@ -47,7 +93,7 @@ pub async fn migrate_firewall(data_dir: PathBuf) {
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::Arc,
     time::Duration,
 };
 use windows_service::{
@@ -112,10 +158,11 @@ fn report(handle: &ServiceStatusHandle, state: ServiceState, accept: ServiceCont
 fn agent_main(_args: Vec<OsString>) {
     let config = Config::for_service();
     init_file_log(&config.data_dir, "agent.log");
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let signal = stop.clone();
     let handle = match service_control_handler::register(AGENT_SERVICE, move |event| match event {
         ServiceControl::Stop | ServiceControl::Shutdown => {
-            let _ = stop_tx.send(());
+            signal.notify_one();
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -133,7 +180,6 @@ fn agent_main(_args: Vec<OsString>) {
             return report(&handle, ServiceState::Stopped, ServiceControlAccept::empty(), 1);
         }
     };
-    let _ = rustls::crypto::ring::default_provider().install_default();
     crate::platform::init();
     report(
         &handle,
@@ -142,9 +188,7 @@ fn agent_main(_args: Vec<OsString>) {
         0,
     );
 
-    let result = runtime.block_on(crate::run_until(config, async {
-        let _ = tokio::task::spawn_blocking(move || stop_rx.recv()).await;
-    }));
+    let result = runtime.block_on(crate::run_until(config, stop.notified()));
     let exit = match result {
         Ok(()) => 0,
         Err(e) => {
@@ -177,6 +221,11 @@ fn updater_main(_args: Vec<OsString>) {
         && let Err(error) = install::configure_firewall(&layout)
     {
         tracing::error!("ปรับกฎไฟร์วอลล์ไม่ได้: {error}");
+    }
+    if !install::recovery_ready(&layout.data_dir)
+        && let Err(error) = install::configure_recovery(&layout.install_dir, &layout.data_dir)
+    {
+        tracing::warn!(%error, "ตั้งค่า recovery ของ Agent ไม่สำเร็จ");
     }
     match manifest::embedded_pubkey() {
         Some(key) => {

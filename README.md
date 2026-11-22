@@ -8,9 +8,11 @@
 
 repo นี้เปิดให้ดูโค้ดและดาวน์โหลดรุ่นที่ปล่อยเท่านั้น ลิขสิทธิ์ทั้งหมดเป็นของเจ้าของโครงการ ไม่ใช่ open source ห้ามนำไปใช้ ดัดแปลง หรือแจกจ่ายต่อโดยไม่ได้รับอนุญาตเป็นลายลักษณ์อักษร ดูรายละเอียดใน [LICENSE](LICENSE)
 
-## Panel ปัจจุบัน
+## Desktop และ Web Panel
 
-เปิดด้วย `synapta-connect.exe panel` หรือเข้า `http://localhost:52402/synaptaconnect` ตามพอร์ตที่ตั้งไว้ หน้า **เครือข่าย** จัดการช่องทาง localhost และ HTTPS บน LAN พร้อมเปลี่ยนพอร์ตเว็บ, Agent API และ discovery ได้
+เปิด Synapta Connect จาก Start Menu หรือเรียก `synapta-connect.exe desktop` บนเครื่องปลายทาง Desktop เปิดได้ขณะที่เว็บหรือ Agent หยุดอยู่ และใช้สิทธิ์ของบัญชี Windows ที่เปิดแอปในการจัดการ service ส่วนการตั้งค่า Agent ใช้สิทธิ์ของบัญชีเจ้าของที่กำหนดตอนติดตั้งหรือผู้ดูแลระบบ
+
+เปิด Web Panel จากปุ่ม **เปิดเว็บ** ใน Desktop หรือเรียก `synapta-connect.exe panel` หน้า **เครือข่าย** จัดการ localhost และ HTTPS บน LAN พร้อมเปลี่ยนพอร์ตเว็บ, Agent API และ discovery ได้
 
 เครื่องปลายทาง Windows x64 ติดตั้งจากไบนารีสำเร็จรูป ส่วนหน้าเว็บและ Agent อัปเดตจากแพ็กเกจที่เซ็นแยกกัน ดูขั้นตอน build, ติดตั้งและเตรียม HTTPS ที่ [คู่มือส่งมอบรุ่น](docs/RELEASE.md)
 

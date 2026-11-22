@@ -2,6 +2,22 @@
 //! (ให้ CI/ผู้เผยแพร่ใส่กุญแจตอน build โดยไม่ต้องแก้ไฟล์ใน repo; รุ่นทดสอบใช้กุญแจทดสอบได้โดยไม่ปนกับของจริง)
 
 fn main() {
+    #[cfg(feature = "desktop")]
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .windows_attributes(
+                tauri_build::WindowsAttributes::new()
+                    .window_icon_path("../installer/windows/assets/synapta-connect.ico"),
+            )
+            .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "agent_request",
+                "service_status",
+                "service_control",
+                "open_web",
+            ])),
+    )
+    .expect("build desktop configuration");
+
     println!("cargo:rerun-if-env-changed=SYNAPTA_RELEASE_PUBKEY");
     println!("cargo:rerun-if-changed=../frontend/dist");
     println!("cargo:rerun-if-changed=../frontend/package.json");

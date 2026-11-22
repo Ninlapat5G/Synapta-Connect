@@ -5,14 +5,14 @@
 //! ล้มกลางทาง = ถอนของที่ลงไปแล้วออกให้หมด ไม่ทิ้งเครื่องไว้ในสภาพครึ่ง ๆ กลาง ๆ
 //! exit code: 0 สำเร็จ · 3 ไม่ได้รันด้วยสิทธิ์ Administrator · 4 ล้มเหลว (ถอนที่ลงไปแล้วออกแล้ว)
 
-use super::{AGENT_ACCOUNT, AGENT_SERVICE, UPDATER_SERVICE, host, http_health};
+use super::{AGENT_ACCOUNT, AGENT_SERVICE, SystemHost, UPDATER_SERVICE, host};
 use crate::{
     cli::InstallOptions,
     config::service_data_dir,
     panel_https,
     settings::SettingsStore,
     update::{
-        installer::{self, EXE_NAME},
+        installer::{self, EXE_NAME, Host},
         version::Version,
     },
 };
@@ -40,6 +40,8 @@ const FIREWALL_UDP: &str = "Synapta Connect (Discovery)";
 const RUN_KEY: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "SynaptaConnectHelper";
 pub(super) const FIREWALL_MARKER: &str = "service-firewall-v2";
+const RECOVERY_MARKER: &str = "service-recovery-v1";
+const WATCHDOG_TASK: &str = "SynaptaConnect Health Monitor";
 
 /// ที่ติดตั้งโปรแกรม — %ProgramFiles%\SynaptaConnect
 pub fn install_dir() -> PathBuf {
@@ -166,6 +168,61 @@ fn run_tool(program: &str, args: &[&str]) -> Result<String, String> {
             text.trim()
         ))
     }
+}
+
+pub(super) fn recovery_ready(data_dir: &Path) -> bool {
+    data_dir.join("updater-status").join(RECOVERY_MARKER).is_file()
+}
+
+pub(super) fn configure_recovery(dir: &Path, data: &Path) -> Result<(), String> {
+    let agent = host::open(AGENT_SERVICE, ServiceAccess::CHANGE_CONFIG)?;
+    agent
+        .update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(10),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(30),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(60),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::None,
+                    delay: Duration::ZERO,
+                },
+            ]),
+        })
+        .map_err(|error| error.to_string())?;
+    agent
+        .set_failure_actions_on_non_crash_failures(true)
+        .map_err(|error| error.to_string())?;
+    let command = format!("\"{}\" watchdog", dir.join(EXE_NAME).display());
+    run_tool(
+        "schtasks.exe",
+        &[
+            "/Create",
+            "/SC",
+            "MINUTE",
+            "/MO",
+            "1",
+            "/RU",
+            "SYSTEM",
+            "/TN",
+            WATCHDOG_TASK,
+            "/TR",
+            &command,
+            "/F",
+        ],
+    )?;
+    std::fs::write(data.join("updater-status").join(RECOVERY_MARKER), b"1").map_err(|error| error.to_string())
 }
 
 fn grant(path: &Path, grants: &[&str]) -> Result<(), String> {
@@ -299,6 +356,7 @@ fn do_install(opts: &InstallOptions, out: &Out, dir: &Path) -> Result<String, St
     })?;
 
     step(out, "firewall", || configure_firewall(&layout_for(dir, &data, &work)))?;
+    step(out, "recovery", || configure_recovery(dir, &data))?;
 
     step(out, "helper_autostart", || {
         let command = format!("\"{}\" helper", exe.display());
@@ -379,7 +437,7 @@ pub(super) fn configure_firewall(layout: &installer::Layout) -> Result<(), Strin
 fn wait_healthy(timeout: Duration) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        match http_health(host::service_panel_port()) {
+        match SystemHost.health() {
             Ok(h) => return Ok(json!(h)),
             Err(e) if Instant::now() >= deadline => {
                 return Err(format!("service ไม่ตอบ health ภายใน {} วินาที: {e}", timeout.as_secs()));
@@ -429,21 +487,6 @@ fn create_services(exe: &Path) -> Result<(), String> {
     agent
         .set_description("ให้ Synapta Code เชื่อมต่อ/ควบคุมเครื่องนี้ผ่านการจับคู่และ mTLS (สิทธิ์ต่ำ) — ปิดได้จาก services.msc หรือ synapta-connect uninstall")
         .map_err(e("ตั้งคำอธิบาย"))?;
-    // ล้มกลางคัน = เริ่มใหม่เอง (รอ 60 วินาที ไม่วน crash เร็ว ๆ) นับใหม่เมื่อเสถียร 1 วัน
-    agent
-        .update_failure_actions(ServiceFailureActions {
-            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86400)),
-            reboot_msg: None,
-            command: None,
-            actions: Some(vec![
-                ServiceAction {
-                    action_type: ServiceActionType::Restart,
-                    delay: Duration::from_secs(60)
-                };
-                3
-            ]),
-        })
-        .map_err(e("ตั้งการเริ่มใหม่เมื่อล้ม"))?;
     agent
         .set_config_service_sid_info(ServiceSidType::Unrestricted)
         .map_err(e("ตั้ง SID ของ service"))?;
@@ -508,7 +551,13 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
         }
         Ok(())
     });
-    run("stop_helpers", &mut || stop_helpers(&exe));
+    run("stop_clients", &mut || stop_clients(&exe));
+    run("watchdog", &mut || {
+        if run_tool("schtasks.exe", &["/Query", "/TN", WATCHDOG_TASK]).is_ok() {
+            run_tool("schtasks.exe", &["/Delete", "/TN", WATCHDOG_TASK, "/F"])?;
+        }
+        Ok(())
+    });
     run("delete_services", &mut || {
         for name in [AGENT_SERVICE, UPDATER_SERVICE] {
             if let Ok(service) = host::open(name, ServiceAccess::DELETE) {
@@ -552,10 +601,10 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
     failures
 }
 
-/// หยุด helper ของทุกผู้ใช้ที่รันจากไฟล์ที่ติดตั้ง (ไม่แตะ synapta-connect.exe ที่ผู้ใช้เปิดเองจากที่อื่น)
-fn stop_helpers(exe: &Path) -> Result<(), String> {
+/// ปิด helper และ Desktop ที่ใช้ exe ที่กำลังจะถูกแทนที่หรือถอนการติดตั้ง
+fn stop_clients(exe: &Path) -> Result<(), String> {
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}'\" | Where-Object {{ $_.ExecutablePath -eq '{}' -and $_.ProcessId -ne {} -and $_.CommandLine -match '\\shelper\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}' OR Name LIKE 'synapta-connect.exe.%'\" | Where-Object {{ ($_.ExecutablePath -eq '{0}' -or $_.ExecutablePath -like '{0}.*') -and $_.ProcessId -ne {1} -and $_.CommandLine -match '\\s(helper|desktop|panel\\s+--gui)\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
         exe.display().to_string().replace('\'', "''"),
         std::process::id(),
     );
@@ -616,7 +665,7 @@ pub fn upgrade(json: bool) -> i32 {
         }
         Ok(())
     })
-    .and_then(|_| step(&out, "stop_helpers", || stop_helpers(&exe)))
+    .and_then(|_| step(&out, "stop_clients", || stop_clients(&exe)))
     .and_then(|_| {
         step(&out, "backup", || {
             std::fs::copy(&exe, &backup)
@@ -714,7 +763,7 @@ pub fn status(json: bool) -> i32 {
     };
     let (dir, data) = (install_dir(), service_data_dir());
     let layout = layout_for(&dir, &data, &data.join("updater"));
-    let health = http_health(host::service_panel_port());
+    let health = SystemHost.health();
     let report = json!({
         "agent": state_of(AGENT_SERVICE),
         "updater": state_of(UPDATER_SERVICE),

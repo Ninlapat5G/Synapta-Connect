@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { request, routes } from './api';
+import { desktop, request, routes, serviceControl, serviceStatus, openWeb } from './api';
 
 const offline = 'เชื่อมต่อ Agent ไม่ได้ กำลังลองใหม่อัตโนมัติ';
 const locked = 'เปิดหน้าจัดการจากไอคอน Synapta Connect หรือคำสั่งด้านล่าง บนเครื่องที่ติดตั้ง';
@@ -18,7 +18,8 @@ function lockedMessage(code) {
 }
 
 export function useSession(code) {
-  const [state, setState] = useState(() => ({ connection: code ? 'opening' : 'locked', message: lockedMessage(code) }));
+  const [state, setState] = useState(() => ({ connection: desktop || code ? 'opening' : 'locked', message: desktop ? '' : lockedMessage(code) }));
+  const [service, setService] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const operation = useRef(null);
@@ -27,38 +28,56 @@ export function useSession(code) {
   const pending = useRef(false);
 
   useEffect(() => {
-    if (!code) return;
+    if (!code && !desktop) return;
     const active = new AbortController();
     let timer;
+    let failures = 0;
 
     function schedule() {
       clearTimeout(timer);
-      if (token.current && !active.signal.aborted) {
-        timer = setTimeout(poll, document.hidden ? 10000 : 2000);
+      if ((desktop || token.current) && !active.signal.aborted) {
+        const delay = failures
+          ? Math.min(30000, 1200 * 2 ** Math.min(failures - 1, 5)) + Math.random() * 500
+          : document.hidden ? 10000 : 2000;
+        timer = setTimeout(poll, delay);
       }
     }
 
     async function poll() {
-      if (!token.current || pending.current || active.signal.aborted) return;
+      if ((!desktop && !token.current) || pending.current || active.signal.aborted) return;
       if (operation.current) { schedule(); return; }
+      clearTimeout(timer);
       pending.current = true;
       const options = { token: token.current, signal: active.signal };
       try {
+        if (desktop) {
+          const current = await serviceStatus();
+          if (active.signal.aborted) return;
+          setService(current);
+          if (current.agent !== 'Running') {
+            setState({ connection: 'offline', message: 'Windows Service ยังไม่พร้อมใช้งาน' });
+            return;
+          }
+        }
         const [status, update] = await Promise.all([
           request(routes.status, options),
           request(routes.updates, options),
         ]);
-        if (!operation.current) setState({ connection: 'online', status, update });
+        failures = 0;
+        if (!operation.current && !active.signal.aborted) {
+          setState({ connection: 'online', status, update, checkedAt: Date.now() });
+        }
       } catch (error) {
         if (active.signal.aborted) return;
-        if (error.status === 403) {
+        if (error.status === 403 && !desktop) {
           token.current = null;
           setState({ connection: 'locked', message: expired });
         } else {
+          failures += 1;
           setState(previous => ({
             ...previous,
             connection: 'offline',
-            message: previous.update?.state === 'applying'
+            message: desktop && error.status === 403 ? error.message : previous.update?.state === 'applying'
               ? 'กำลังรอ service เริ่มใหม่ ระบบจะเชื่อมต่ออีกครั้งอัตโนมัติ'
               : offline,
           }));
@@ -70,7 +89,8 @@ export function useSession(code) {
     }
 
     refresh.current = poll;
-    request(routes.exchange, { method: 'POST', body: { code }, signal: active.signal })
+    if (desktop) poll();
+    else request(routes.exchange, { method: 'POST', body: { code }, signal: active.signal })
       .then(session => {
         if (active.signal.aborted) return;
         if (!session.token) throw new Error(linkExpired);
@@ -83,27 +103,31 @@ export function useSession(code) {
         }
       });
     document.addEventListener('visibilitychange', poll);
+    window.addEventListener('online', poll);
     return () => {
       active.abort();
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', poll);
+      window.removeEventListener('online', poll);
     };
   }, [code]);
 
-  async function action(path, method = 'POST', body, success = 'ดำเนินการแล้ว') {
-    if (!token.current || operation.current) return false;
+  async function run(command, success) {
+    if (operation.current) return false;
     operation.current = true;
     setBusy(true);
     try {
-      const result = await request(path, { method, body, token: token.current });
-      setNotice({ text: result.revoked === false ? 'ไม่พบอุปกรณ์ที่ต้องการยกเลิกสิทธิ์' : success });
+      const result = await command();
+      setNotice({ text: result?.revoked === false ? 'ไม่พบอุปกรณ์ที่ต้องการยกเลิกสิทธิ์' : success });
       return result;
     } catch (error) {
-      if (error.status === 403) {
+      if (error.status === 403 && !desktop) {
         token.current = null;
         setState({ connection: 'locked', message: expired });
       } else {
-        setNotice({ text: error instanceof TypeError ? 'เชื่อมต่อ Agent ไม่ได้ กรุณาลองใหม่' : error.message, error: true });
+        const message = error instanceof TypeError || error.name === 'TimeoutError' || error.status === 0
+          ? 'ยังยืนยันผลไม่ได้ ระบบจะตรวจสถานะล่าสุดอีกครั้ง' : error.message || String(error);
+        setNotice({ text: message, error: true });
       }
       return false;
     } finally {
@@ -113,5 +137,15 @@ export function useSession(code) {
     }
   }
 
-  return { ...state, action, busy, notice, setNotice };
+  function action(path, method = 'POST', body, success = 'ดำเนินการแล้ว') {
+    if (!desktop && !token.current) return false;
+    return run(() => request(path, { method, body, token: token.current }), success);
+  }
+
+  function serviceAction(action) {
+    return run(() => serviceControl(action), 'ส่งคำสั่งให้ Windows Service แล้ว');
+  }
+
+  return { ...state, service, action, serviceAction, openBrowser: () => run(openWeb, 'เปิด Web Panel แล้ว'),
+    refresh: () => refresh.current?.(), busy, notice, setNotice };
 }

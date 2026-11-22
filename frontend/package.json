@@ -1,14 +1,17 @@
 {
   "name": "synapta-connect-panel",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "build:desktop": "vite build --mode desktop"
   },
   "dependencies": {
+    "@tauri-apps/api": "2.12.5",
     "lucide-react": "1.77.0",
+    "motion": "14.14.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

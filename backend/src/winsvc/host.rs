@@ -89,8 +89,36 @@ impl Host for SystemHost {
         start_service(AGENT_SERVICE)
     }
     fn health(&self) -> Result<Health, String> {
-        http_health(service_panel_port())
+        ipc_health().or_else(|_| http_health(service_panel_port()))
     }
+}
+
+fn ipc_health() -> Result<Health, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let reply = runtime
+        .block_on(crate::desktop_ipc::request(
+            "GET".into(),
+            "/api/v1/local/health".into(),
+            None,
+        ))
+        .map_err(|e| e.to_string())?;
+    if reply.status != 200 || reply.data["ok"].as_bool() != Some(true) {
+        return Err("Agent ไม่ตอบการตรวจสุขภาพ".into());
+    }
+    let version = reply.data["version"].as_str().ok_or("Agent ไม่แจ้งรุ่น")?.to_owned();
+    let pid = reply.data["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .ok_or("Agent ไม่แจ้ง PID")?;
+    let uptime_secs = reply.data["uptime_secs"].as_u64().ok_or("Agent ไม่แจ้งเวลาเริ่มทำงาน")?;
+    Ok(Health {
+        version,
+        pid,
+        uptime_secs,
+    })
 }
 
 pub fn service_panel_port() -> u16 {

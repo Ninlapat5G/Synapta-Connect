@@ -249,7 +249,7 @@ fn apply(
     // 3) เตรียมไฟล์ใหม่ข้าง ๆ ไฟล์จริง ก่อนหยุด agent เพื่อให้ช่วงที่ service ดับสั้นที่สุด
     std::fs::copy(&package, layout.exe_new())
         .map_err(|e| fail(err("apply", "apply_failed", format!("วางไฟล์ใหม่ไม่ได้: {e}"))))?;
-    let _ = std::fs::remove_file(layout.exe_old());
+    clear_old_image(layout).map_err(|e| fail(err("apply", "apply_failed", format!("เก็บไฟล์รุ่นเดิมไม่ได้: {e}"))))?;
 
     // 4) จดบันทึกแล้วเริ่มสลับ — จากจุดนี้ ล้มเหลว/ถูกขัดจังหวะ = กู้คืน
     let mut journal = Journal {
@@ -369,6 +369,31 @@ fn backup_current(layout: &Layout, backup: &Path) -> std::io::Result<()> {
     std::fs::copy(layout.exe(), backup.join(EXE_NAME))?;
     std::fs::copy(layout.install_json(), backup.join("install.json"))?;
     Ok(())
+}
+
+fn clear_old_image(layout: &Layout) -> std::io::Result<()> {
+    let retired = format!("{EXE_NAME}.retired-");
+    for entry in std::fs::read_dir(&layout.install_dir)?.flatten() {
+        let name = entry.file_name();
+        if name
+            .to_string_lossy()
+            .strip_prefix(&retired)
+            .is_some_and(|suffix| suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    match std::fs::remove_file(layout.exe_old()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Desktop can keep the previous image mapped while a later upgrade swaps the active file.
+        Err(_) => std::fs::rename(
+            layout.exe_old(),
+            layout
+                .install_dir
+                .join(format!("{retired}{}", crate::hex::random_id(8))),
+        ),
+    }
 }
 
 /// สลับ: exe → exe.old, exe.new → exe (ทั้งคู่เป็น rename) แล้วจดรุ่นใหม่
