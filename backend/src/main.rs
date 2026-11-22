@@ -36,14 +36,17 @@ fn run(command: Command) -> i32 {
             lan,
             enable_local,
             recover_web,
+            link_only,
             gui,
         } => {
             #[cfg(all(windows, feature = "desktop"))]
-            if gui && local_port.is_none() && lan.is_none() && !enable_local && !recover_web {
+            if gui && local_port.is_none() && lan.is_none() && !enable_local && !recover_web && !link_only {
                 return launch_desktop();
             }
             block_on(async {
-                match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web).await {
+                match synapta_connect::open_panel::run(local_port, lan.as_deref(), enable_local, recover_web, link_only)
+                    .await
+                {
                     Ok(msg) => {
                         println!("{msg}");
                         0

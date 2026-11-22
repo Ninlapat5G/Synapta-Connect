@@ -15,7 +15,7 @@ panel **ไม่เปิดเอง** — ผู้ใช้สั่ง `syn
 1. อ่าน `code` จาก `location.hash` แล้ว **ลบ hash ทิ้งทันที** (`history.replaceState`)
 2. `POST /api/v1/panel/exchange` body `{"code": "..."}` → `{"token": "...", "expires_at": <unix วินาที>}`
    (รหัสใช้ได้ครั้งเดียว; ผิด/หมดอายุ = `403`)
-3. ทุก request หลังจากนั้นแนบ header `X-Synapta-Local: <token>` (เก็บ token ในตัวแปรหน่วยความจำของหน้าเว็บ ไม่ใช้ localStorage/cookie)
+3. ทุก request หลังจากนั้นแนบ header `X-Synapta-Local: <token>` เบราว์เซอร์เก็บ token อายุ 8 ชั่วโมงใน `sessionStorage` ของ origin และแท็บเดิมเพื่อให้รีเฟรชได้ ถ้า server ปฏิเสธสิทธิ์ หน้าเว็บจะลบ token ออก
 4. token อายุ 8 ชั่วโมง และ **รอดการรีสตาร์ทของ agent** (agent เก็บเฉพาะ SHA-256 ของ token ไว้ใน `panel_sessions.json` จนถึงเวลาหมดอายุ) —
    ตอนอัปเดตสำเร็จ/กู้คืน service รีสตาร์ท แต่ token เดิมยังใช้ได้ หน้าเว็บ poll ต่อได้เลยและเห็นผลอัปเดต; ช่วงที่ service ยังไม่กลับมา request จะ fail (เชื่อมต่อไม่ได้) ให้ลองใหม่เงียบ ๆ
    `403` = token หมดอายุ/ไม่รู้จัก (หรือ Host/Origin ผิด) → แสดงข้อความ "เปิด panel ใหม่ด้วยคำสั่ง synapta-connect panel"

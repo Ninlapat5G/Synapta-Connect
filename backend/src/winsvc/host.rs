@@ -9,7 +9,12 @@ use crate::{
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     time::{Duration, Instant},
+};
+use windows::Win32::{
+    Foundation::{HANDLE, WAIT_OBJECT_0},
+    System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
 };
 use windows_service::{
     service::{Service, ServiceAccess, ServiceState},
@@ -64,19 +69,44 @@ pub fn start_service(name: &str) -> Result<(), String> {
 /// หยุดแล้วรอจนหยุดจริง (หยุดอยู่แล้ว = สำเร็จ)
 pub fn stop_service(name: &str) -> Result<(), String> {
     let service = open(name, ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)?;
+    let process = service
+        .query_status()
+        .ok()
+        .and_then(|status| status.process_id)
+        .and_then(|pid| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok() })
+        .map(|handle| unsafe { OwnedHandle::from_raw_handle(handle.0) });
     match service.stop() {
         Ok(_) => {}
-        Err(e) if win32_code(&e) == Some(NOT_ACTIVE) => return Ok(()),
+        Err(e) if win32_code(&e) == Some(NOT_ACTIVE) => {}
+        Err(_) if state_of(&service)? == ServiceState::StopPending => {}
         Err(e) => return Err(format!("หยุด {name} ไม่ได้: {e}")),
     }
-    let deadline = Instant::now() + WAIT;
+    wait_for_stop(&service, name, WAIT)?;
+    if let Some(process) = process {
+        let result = unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), 5000) };
+        if result != WAIT_OBJECT_0 {
+            return Err(format!("{name} หยุดแล้วแต่โปรเซสยังไม่ออก"));
+        }
+    }
+    Ok(())
+}
+
+pub fn wait_until_stopped(name: &str, timeout: Duration) -> Result<(), String> {
+    if !service_exists(name)? {
+        return Ok(());
+    }
+    wait_for_stop(&open(name, ServiceAccess::QUERY_STATUS)?, name, timeout)
+}
+
+fn wait_for_stop(service: &Service, name: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if state_of(&service)? == ServiceState::Stopped {
+        if state_of(service)? == ServiceState::Stopped {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err(format!("{name} ไม่หยุดภายใน {} วินาที", WAIT.as_secs()))
+    Err(format!("{name} ยังทำงานอยู่หลังรอ {} วินาที", timeout.as_secs()))
 }
 
 pub struct SystemHost;

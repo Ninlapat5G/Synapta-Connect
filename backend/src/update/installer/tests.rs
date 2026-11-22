@@ -307,6 +307,54 @@ fn interruption_that_left_no_exe_at_all_is_recovered_from_backup() {
 }
 
 #[test]
+fn unresolved_recovery_prevents_another_update_from_overwriting_the_journal() {
+    let f = fixture();
+    let layout = f.layout();
+    f.stage("0.3.1", "0.3.1|ok");
+    fsutil::write_json(
+        &layout.journal(),
+        &Journal {
+            from: "0.2.9".into(),
+            to: "0.3.0".into(),
+            state: "verifying".into(),
+        },
+    )
+    .unwrap();
+
+    assert!(apply_pending(layout, &f.host, &f.signer.public(), &timing()).is_none());
+    let journal: Journal = fsutil::read_json(&layout.journal()).unwrap();
+    assert_eq!(journal.from, "0.2.9");
+    assert_eq!(f.host.exe_text(), "0.3.0|ok");
+    assert!(!layout.last_request().exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn replaced_windows_image_can_remain_mapped_during_recovery() {
+    use std::{os::windows::process::CommandExt, process::Command};
+    let f = fixture();
+    let layout = f.layout();
+    let ping = crate::platform::win::system_tool("ping.exe");
+    std::fs::copy(ping, layout.exe()).unwrap();
+    std::fs::write(layout.exe_new(), "restored image").unwrap();
+    let mut child = Command::new(layout.exe())
+        .args(["-t", "127.0.0.1"])
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .unwrap();
+    let displaced = retired_image(layout);
+    let result = replace_executable(layout, &displaced);
+    let still_running = child.try_wait().unwrap().is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    result.unwrap();
+    assert!(still_running);
+    assert!(displaced.is_file());
+    assert_eq!(std::fs::read_to_string(layout.exe()).unwrap(), "restored image");
+}
+
+#[test]
 fn rollback_that_cannot_complete_is_reported_loudly_with_backup_path() {
     let f = fixture();
     let l = f.layout();

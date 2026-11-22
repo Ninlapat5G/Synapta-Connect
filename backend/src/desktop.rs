@@ -47,7 +47,7 @@ async fn service_control(action: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn open_web() -> Result<(), String> {
-    open_panel::run(None, None, false, false).await.map(|_| ())
+    open_panel::run(None, None, false, false, false).await.map(|_| ())
 }
 
 pub fn run() -> tauri::Result<()> {

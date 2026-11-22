@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 
 const LOCAL = '/api/v1/local';
+export const panelCommand = String.raw`& "C:\Program Files\SynaptaConnect\synapta-connect.exe" panel`;
 export const desktop = isTauri();
 export const serviceStatus = () => invoke('service_status');
 export const serviceControl = action => invoke('service_control', { action });
@@ -46,20 +47,30 @@ export async function request(path, { method = 'GET', body, token, signal } = {}
   if (token) headers['X-Synapta-Local'] = token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const response = await fetch(path, {
-    method,
-    headers,
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: 'no-store',
-    redirect: 'error',
-  });
-  const data = await response.json().catch(() => null);
-  if (!response.ok || !data) {
-    throw new RequestError(response.status, data?.error?.message ??
-      (response.status === 429 ? 'เรียกบ่อยเกินไป กรุณารอสักครู่' : 'คำขอไม่สำเร็จ (' + response.status + ')'));
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, 8000);
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  try {
+    const response = await fetch(path, {
+      method,
+      headers,
+      signal: controller.signal,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: 'no-store',
+      redirect: 'error',
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data) {
+      throw new RequestError(response.status, data?.error?.message ??
+        (response.status === 429 ? 'เรียกบ่อยเกินไป กรุณารอสักครู่' : 'คำขอไม่สำเร็จ (' + response.status + ')'));
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
-  return data;
 }
 
 export function formatDate(value) {

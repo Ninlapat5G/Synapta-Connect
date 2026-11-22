@@ -4,7 +4,7 @@ import { Activity, ArrowRight, Box, CircleHelp, Download, ExternalLink, Globe, L
 import { LazyMotion, domAnimation, useReducedMotion } from 'motion/react';
 import * as m from 'motion/react-m';
 import logo from '../assets/synapta-connect.png';
-import { desktop, readOpeningCode, routes } from './api';
+import { desktop, panelCommand, readOpeningCode, routes } from './api';
 import { Devices, NetworkDetails, Pairing } from './devices';
 import { InstallGuide, NetworkSettings, Settings } from './settings';
 import { useSession } from './session';
@@ -20,9 +20,6 @@ const pages = [
   ['settings', 'ตั้งค่า', Settings2],
   ['install', 'คู่มือติดตั้ง', CircleHelp],
 ];
-// The installer puts the agent in Program Files, which is not on PATH; PowerShell needs `&` for a quoted path.
-const installedAgent = String.raw`& "$env:ProgramFiles\SynaptaConnect\synapta-connect.exe"`;
-const openCommand = installedAgent + ' panel';
 const themeKey = 'synapta-connect-theme';
 
 function initialTheme() {
@@ -158,12 +155,14 @@ function SystemStatus({ data, service, online, busy, confirm, action, serviceAct
 function OpenPanel({ message, notify }) {
   return <Card className="max-w-2xl">
     <SectionTitle icon={ShieldCheck} description={message}>ยืนยันสิทธิ์เข้าหน้าจัดการ</SectionTitle>
-    <p className="text-sm">เปิด <strong>Synapta Connect</strong> บนเครื่องปลายทางด้วยบัญชีที่ได้รับสิทธิ์ แล้วกด <strong>เปิดเว็บ</strong> หรือใช้ PowerShell เพื่อขอลิงก์เข้า Web Panel</p>
+    <p className="text-sm">เปิด <strong>Synapta Connect</strong> บนเครื่องปลายทางด้วยบัญชีที่ได้รับสิทธิ์ แล้วกด <strong>เปิดเว็บ</strong> หรือรันคำสั่งนี้ใน PowerShell บนเครื่องนั้นเพื่อเปิดหน้าเว็บพร้อมยืนยันสิทธิ์</p>
     <div className="inset mt-2 flex flex-wrap items-center justify-between gap-3 rounded-xl p-3">
-      <code className="break-all text-sm">{openCommand}</code>
-      <CopyButton text={openCommand} onError={notify} />
+      <code className="break-all text-sm">{panelCommand}</code>
+      <CopyButton text={panelCommand} onError={notify} />
     </div>
-    <p className="mt-3 text-sm text-muted">ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="break-all text-ink">{openCommand} --lan ชื่อเครื่อง</code></p>
+    <p className="mt-3 text-sm text-muted">ถ้าเบราว์เซอร์ยังไม่เปิดพร้อมสิทธิ์ ให้ต่อท้ายคำสั่งด้วย <code className="text-ink">--link</code> แล้ววางลิงก์ที่ได้ลงใน Chrome หรือ Edge ภายใน 60 วินาที</p>
+    <p className="mt-3 text-sm text-muted">ถ้าแจ้งว่าหาไฟล์ไม่พบ ให้รัน <code className="text-ink">sc.exe qc SynaptaConnect</code> เพื่อดูพาธจริงที่ <code className="text-ink">BINARY_PATH_NAME</code></p>
+    <p className="mt-3 text-sm text-muted">ถ้าเปิดจากเครื่องอื่น ให้เจ้าของเครื่องปลายทางออกลิงก์ HTTPS ด้วยคำสั่ง <code className="break-all text-ink">{panelCommand} --lan ชื่อเครื่อง</code></p>
   </Card>;
 }
 

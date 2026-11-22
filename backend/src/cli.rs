@@ -51,6 +51,7 @@ pub enum Command {
         lan: Option<String>,
         enable_local: bool,
         recover_web: bool,
+        link_only: bool,
         /// เปิดจากไอคอน: แจ้งข้อผิดพลาดเป็นกล่องข้อความ (หน้าต่าง console ปิดทันทีจนอ่านไม่ทัน)
         gui: bool,
     },
@@ -71,7 +72,7 @@ pub const USAGE: &str = "การใช้งาน:
       ใช้ไฟล์นี้แทนรุ่นที่ติดตั้งไว้ โดยคงการจับคู่และค่าตั้ง (ต้องรันด้วยสิทธิ์ Administrator)
   synapta-connect service start|stop|status [--json]
   synapta-connect desktop
-  synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web] [--gui]
+  synapta-connect panel [--local-port N] [--lan HOST | --enable-local] [--recover-web] [--gui | --link]
   synapta-connect --version";
 
 pub fn parse(args: Vec<String>) -> Result<Command, String> {
@@ -100,6 +101,7 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
             let mut enable_local = false;
             let mut recover_web = false;
             let mut gui = false;
+            let mut link_only = false;
             let mut it = rest.iter();
             while let Some(flag) = it.next() {
                 match flag.as_str() {
@@ -122,17 +124,22 @@ pub fn parse(args: Vec<String>) -> Result<Command, String> {
                     "--enable-local" => enable_local = true,
                     "--recover-web" => recover_web = true,
                     "--gui" => gui = true,
+                    "--link" => link_only = true,
                     other => return Err(format!("ไม่รู้จักตัวเลือก {other}")),
                 }
             }
             if lan.is_some() && enable_local {
                 return Err("เลือก --lan หรือ --enable-local อย่างใดอย่างหนึ่ง".into());
             }
+            if gui && link_only {
+                return Err("เลือก --gui หรือ --link อย่างใดอย่างหนึ่ง".into());
+            }
             Ok(Command::Panel {
                 local_port: port,
                 lan,
                 enable_local,
                 recover_web,
+                link_only,
                 gui,
             })
         }
@@ -264,6 +271,10 @@ mod tests {
         assert!(matches!(p(&["updater", "run"]), Ok(Command::UpdaterRun)));
         assert!(matches!(p(&["upgrade"]), Ok(Command::Upgrade { json: false })));
         assert!(matches!(p(&["upgrade", "--json"]), Ok(Command::Upgrade { json: true })));
+        assert!(matches!(
+            p(&["panel", "--link"]),
+            Ok(Command::Panel { link_only: true, .. })
+        ));
         assert!(p(&["upgrade", "--force"]).is_err());
         assert!(matches!(
             p(&["uninstall", "--keep-data"]),

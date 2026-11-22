@@ -138,7 +138,11 @@ struct Journal {
 }
 
 pub fn installed_version(layout: &Layout) -> Option<String> {
-    fsutil::read_json::<InstallInfo>(&layout.install_json()).map(|i| i.version)
+    installed_version_from(&layout.install_json())
+}
+
+fn installed_version_from(path: &Path) -> Option<String> {
+    fsutil::read_json::<InstallInfo>(path).map(|i| i.version)
 }
 
 pub fn write_install_info(layout: &Layout, version: &str) -> std::io::Result<()> {
@@ -156,6 +160,9 @@ fn err(stage: &str, code: &str, message: impl Into<String>) -> UpdateError {
 
 /// ทำคำขอที่ค้างอยู่ (ถ้ามี) — None = ไม่มีคำขอ หรือเป็นคำขอที่ทำไปแล้ว
 pub fn apply_pending(layout: &Layout, host: &dyn Host, pubkey: &[u8; 32], timing: &Timing) -> Option<UpdateResult> {
+    if layout.journal().exists() {
+        return None;
+    }
     let request: Request = fsutil::read_json(&layout.request())?;
     // จำรหัสคำขอไว้ในที่ของเรา (ไม่ลบไฟล์ของ agent): ตัวติดตั้งตื่นตอนบูตทุกครั้ง ต้องไม่ทำคำขอเดิมซ้ำ
     if std::fs::read_to_string(layout.last_request()).is_ok_and(|id| id == request.id) {
@@ -202,6 +209,10 @@ pub fn recover(layout: &Layout, host: &dyn Host, timing: &Timing) -> Option<Upda
         let _ = std::fs::remove_file(layout.exe_old());
     }
     let journal: Journal = fsutil::read_json(&layout.journal())?;
+    if Version::parse(&journal.from).is_none() || Version::parse(&journal.to).is_none() {
+        tracing::error!("ไม่สามารถอ่านรุ่นจาก journal ของตัวอัปเดต");
+        return None;
+    }
     let error = err(
         "apply",
         "interrupted_rolled_back",
@@ -247,7 +258,7 @@ fn apply(
     backup_current(layout, &backup).map_err(|e| fail(err("apply", "apply_failed", format!("สำรองรุ่นเดิมไม่ได้: {e}"))))?;
 
     // 3) เตรียมไฟล์ใหม่ข้าง ๆ ไฟล์จริง ก่อนหยุด agent เพื่อให้ช่วงที่ service ดับสั้นที่สุด
-    std::fs::copy(&package, layout.exe_new())
+    stage_executable(&package, &layout.exe_new())
         .map_err(|e| fail(err("apply", "apply_failed", format!("วางไฟล์ใหม่ไม่ได้: {e}"))))?;
     clear_old_image(layout).map_err(|e| fail(err("apply", "apply_failed", format!("เก็บไฟล์รุ่นเดิมไม่ได้: {e}"))))?;
 
@@ -371,6 +382,81 @@ fn backup_current(layout: &Layout, backup: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn stage_executable(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    std::fs::File::options().write(true).open(to)?.sync_all()
+}
+
+fn rename_image(from: &Path, to: &Path) -> std::io::Result<()> {
+    for _attempt in 0..20 {
+        match std::fs::rename(from, to) {
+            #[cfg(windows)]
+            Err(error) if _attempt < 19 && matches!(error.raw_os_error(), Some(5 | 32 | 33)) => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+/// Rename the running image out of the way. Windows can rename an image whose
+/// process still holds it, while deleting or replacing it in place can fail.
+fn replace_executable(layout: &Layout, displaced: &Path) -> std::io::Result<()> {
+    let active = layout.exe();
+    let had_active = match rename_image(&active, displaced) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = rename_image(&layout.exe_new(), &active) {
+        if had_active && let Err(restore) = rename_image(displaced, &active) {
+            return Err(std::io::Error::other(format!(
+                "{error}; คืนไฟล์จาก {} ไม่ได้: {restore}",
+                displaced.display()
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn retired_image(layout: &Layout) -> PathBuf {
+    layout
+        .install_dir
+        .join(format!("{EXE_NAME}.retired-{}", crate::hex::random_id(8)))
+}
+
+#[cfg(windows)]
+pub(crate) fn clear_manual_recovery(layout: &Layout) -> std::io::Result<()> {
+    let journal = layout.journal();
+    let archive = layout
+        .work_dir
+        .join(format!("journal.before-repair-{}.json", crate::hex::random_id(8)));
+    match std::fs::rename(journal, archive) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_manually(layout: &Layout, image: &Path) -> std::io::Result<()> {
+    stage_executable(image, &layout.exe_new())?;
+    let displaced = retired_image(layout);
+    replace_executable(layout, &displaced)?;
+    let _ = std::fs::remove_file(displaced);
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn record_manual_upgrade(layout: &Layout, from: String, version: String) -> std::io::Result<()> {
+    let result = new_result(version, from, "installed", None);
+    std::fs::create_dir_all(layout.status_dir())?;
+    fsutil::write_json(&layout.result(), &result)?;
+    History::installer(&layout.status_dir()).append(&Entry::new(&result.from, Some(&result.version), &result.outcome));
+    Ok(())
+}
+
 fn clear_old_image(layout: &Layout) -> std::io::Result<()> {
     let retired = format!("{EXE_NAME}.retired-");
     for entry in std::fs::read_dir(&layout.install_dir)?.flatten() {
@@ -387,24 +473,23 @@ fn clear_old_image(layout: &Layout) -> std::io::Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         // Desktop can keep the previous image mapped while a later upgrade swaps the active file.
-        Err(_) => std::fs::rename(
-            layout.exe_old(),
-            layout
-                .install_dir
-                .join(format!("{retired}{}", crate::hex::random_id(8))),
-        ),
+        Err(_) => rename_image(&layout.exe_old(), &retired_image(layout)),
     }
 }
 
 /// สลับ: exe → exe.old, exe.new → exe (ทั้งคู่เป็น rename) แล้วจดรุ่นใหม่
 fn swap_in(layout: &Layout, version: &str) -> Result<(), UpdateError> {
     let fail = |m: String| err("apply", "apply_failed", m);
-    std::fs::rename(layout.exe(), layout.exe_old()).map_err(|e| fail(format!("ย้ายไฟล์เดิมไม่ได้: {e}")))?;
-    std::fs::rename(layout.exe_new(), layout.exe()).map_err(|e| fail(format!("วางไฟล์ใหม่ไม่ได้: {e}")))?;
+    replace_executable(layout, &layout.exe_old()).map_err(|e| fail(format!("สลับไฟล์โปรแกรมไม่ได้: {e}")))?;
     write_install_info(layout, version).map_err(|e| fail(format!("บันทึก install.json ไม่ได้: {e}")))
 }
 
-fn wait_healthy(host: &dyn Host, timing: &Timing, version: &str, require_stable: bool) -> Result<(), UpdateError> {
+pub(crate) fn wait_healthy(
+    host: &dyn Host,
+    timing: &Timing,
+    version: &str,
+    require_stable: bool,
+) -> Result<(), UpdateError> {
     let fail = |m: String| err("health", "health_check_failed", m);
     let deadline = Instant::now() + timing.health_timeout;
     let first = loop {
@@ -439,7 +524,10 @@ fn finish_with_rollback(
 ) -> (&'static str, UpdateError) {
     match rollback(layout, host, timing, journal) {
         Ok(()) => ("rolled_back", cause),
-        Err(e) => ("failed", e),
+        Err(mut e) => {
+            e.message = format!("{} · สาเหตุที่เริ่มกู้คืน: {}", e.message, cause.message);
+            ("failed", e)
+        }
     }
 }
 
@@ -454,13 +542,15 @@ fn rollback(layout: &Layout, host: &dyn Host, timing: &Timing, journal: &Journal
             format!("กู้รุ่นเดิมไม่สำเร็จ: {m} — ตัวติดตั้งรุ่นเดิมสำรองไว้ที่ {}", backup.display()),
         )
     };
+    let previous = installed_version_from(&backup.join("install.json"))
+        .filter(|version| version == &journal.from)
+        .ok_or_else(|| fail("ข้อมูลรุ่นในไฟล์สำรองไม่ตรงกับ journal".into()))?;
+    stage_executable(&backup.join(EXE_NAME), &layout.exe_new()).map_err(|e| fail(format!("อ่านสำรองไม่ได้: {e}")))?;
     host.stop_agent().map_err(|e| fail(format!("หยุด service ไม่ได้: {e}")))?;
-
-    // รุ่นเดิมเอาจากสำรองเสมอ (สมบูรณ์แน่) — วางข้างไฟล์จริงแล้ว rename ทับ
-    std::fs::copy(backup.join(EXE_NAME), layout.exe_new()).map_err(|e| fail(format!("อ่านสำรองไม่ได้: {e}")))?;
-    let _ = std::fs::remove_file(layout.exe());
-    std::fs::rename(layout.exe_new(), layout.exe()).map_err(|e| fail(format!("วางไฟล์เดิมคืนไม่ได้: {e}")))?;
-    std::fs::copy(backup.join("install.json"), layout.install_json()).map_err(|e| fail(e.to_string()))?;
+    let displaced = retired_image(layout);
+    replace_executable(layout, &displaced).map_err(|e| fail(format!("วางไฟล์เดิมคืนไม่ได้: {e}")))?;
+    write_install_info(layout, &previous).map_err(|e| fail(e.to_string()))?;
+    let _ = std::fs::remove_file(displaced);
     let _ = std::fs::remove_file(layout.exe_old());
 
     host.start_agent()

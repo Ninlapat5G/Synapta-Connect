@@ -4,31 +4,40 @@ import { desktop, request, routes, serviceControl, serviceStatus, openWeb } from
 const offline = 'เชื่อมต่อ Agent ไม่ได้ กำลังลองใหม่อัตโนมัติ';
 const locked = 'เปิดหน้าจัดการจากไอคอน Synapta Connect หรือคำสั่งด้านล่าง บนเครื่องที่ติดตั้ง';
 const linkExpired = 'ลิงก์เปิดหน้านี้หมดอายุหรือถูกใช้ไปแล้ว เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
-const reloaded = 'หน้าถูกโหลดใหม่ จึงต้องยืนยันสิทธิ์อีกครั้ง เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
 const expired = 'เซสชันหมดอายุ เปิดจากไอคอนหรือคำสั่งด้านล่างอีกครั้ง';
-const openedKey = 'synapta-connect-opened';
+const sessionKey = 'synapta-connect-panel-session';
 
-// A reload drops the one-time code from the address, so tell that apart from a first visit.
-function lockedMessage(code) {
+// The short-lived panel token is scoped to this origin and tab, including across reloads.
+function savedSession() {
   try {
-    if (code) sessionStorage.setItem(openedKey, '1');
-    else if (sessionStorage.getItem(openedKey)) return reloaded;
+    const saved = JSON.parse(sessionStorage.getItem(sessionKey));
+    if (typeof saved?.token === 'string' && /^[a-f0-9]{64}$/.test(saved.token) && saved.expires_at > Date.now() / 1000) {
+      return saved.token;
+    }
   } catch { /* Browser storage may be disabled. */ }
-  return locked;
+  return null;
+}
+
+function saveSession(session) {
+  try {
+    if (session) sessionStorage.setItem(sessionKey, JSON.stringify({ token: session.token, expires_at: session.expires_at }));
+    else sessionStorage.removeItem(sessionKey);
+  } catch { /* In-memory authorization still works. */ }
 }
 
 export function useSession(code) {
-  const [state, setState] = useState(() => ({ connection: desktop || code ? 'opening' : 'locked', message: desktop ? '' : lockedMessage(code) }));
+  const [cached] = useState(() => desktop ? null : savedSession());
+  const [state, setState] = useState(() => ({ connection: desktop || code || cached ? 'opening' : 'locked', message: locked }));
   const [service, setService] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const operation = useRef(null);
   const refresh = useRef(null);
-  const token = useRef(null);
+  const token = useRef(cached);
   const pending = useRef(false);
 
   useEffect(() => {
-    if (!code && !desktop) return;
+    if (!code && !desktop && !cached) return;
     const active = new AbortController();
     let timer;
     let failures = 0;
@@ -71,6 +80,7 @@ export function useSession(code) {
         if (active.signal.aborted) return;
         if (error.status === 403 && !desktop) {
           token.current = null;
+          saveSession(null);
           setState({ connection: 'locked', message: expired });
         } else {
           failures += 1;
@@ -89,17 +99,19 @@ export function useSession(code) {
     }
 
     refresh.current = poll;
-    if (desktop) poll();
+    if (desktop || !code) poll();
     else request(routes.exchange, { method: 'POST', body: { code }, signal: active.signal })
       .then(session => {
         if (active.signal.aborted) return;
         if (!session.token) throw new Error(linkExpired);
         token.current = session.token;
+        saveSession(session);
         return poll();
       })
       .catch(error => {
         if (!active.signal.aborted) {
-          setState({ connection: 'locked', message: error.status === 403 ? linkExpired : 'เชื่อมต่อเพื่อยืนยันตัวตนไม่ได้ กรุณาขอลิงก์ใหม่' });
+          if (token.current) poll();
+          else setState({ connection: 'locked', message: error.status === 403 ? linkExpired : 'เชื่อมต่อเพื่อยืนยันตัวตนไม่ได้ กรุณาขอลิงก์ใหม่' });
         }
       });
     document.addEventListener('visibilitychange', poll);
@@ -110,7 +122,7 @@ export function useSession(code) {
       document.removeEventListener('visibilitychange', poll);
       window.removeEventListener('online', poll);
     };
-  }, [code]);
+  }, [cached, code]);
 
   async function run(command, success) {
     if (operation.current) return false;
@@ -123,9 +135,10 @@ export function useSession(code) {
     } catch (error) {
       if (error.status === 403 && !desktop) {
         token.current = null;
+        saveSession(null);
         setState({ connection: 'locked', message: expired });
       } else {
-        const message = error instanceof TypeError || error.name === 'TimeoutError' || error.status === 0
+        const message = error instanceof TypeError || error.name === 'AbortError' || error.status === 0
           ? 'ยังยืนยันผลไม่ได้ ระบบจะตรวจสถานะล่าสุดอีกครั้ง' : error.message || String(error);
         setNotice({ text: message, error: true });
       }

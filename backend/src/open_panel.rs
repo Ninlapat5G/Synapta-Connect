@@ -10,6 +10,7 @@ pub async fn run(
     lan: Option<&str>,
     enable_local: bool,
     recover_web: bool,
+    link_only: bool,
 ) -> Result<String, String> {
     let config = Config::default();
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -55,6 +56,9 @@ pub async fn run(
             return Ok(format!("https://{host}:{port}{}#code={code}", crate::panel::PATH));
         }
         let url = format!("http://127.0.0.1:{port}{}#code={code}", crate::panel::PATH);
+        if link_only {
+            return Ok(url);
+        }
         open_browser(&url)?;
         // พิมพ์ลิงก์ไว้ด้วย: ถ้าเบราว์เซอร์ไม่ขึ้น ยังคัดลอกไปเปิดเองได้
         return Ok(format!(

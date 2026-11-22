@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Globe, Monitor, Network, Radio, Settings2, Terminal } from 'lucide-react';
-import { desktop, routes } from './api';
+import { desktop, panelCommand, routes } from './api';
 import { Button, Card, CopyButton, Field, SectionTitle, Toggle } from './ui';
 
 const portFields = [
@@ -52,7 +52,7 @@ export function NetworkSettings({ network, disabled, action, confirm }) {
       confirm({
         title: 'ใช้การตั้งค่าเครือข่ายใหม่',
         text: !currentChannelEnabled
-          ? 'ช่องทางที่กำลังใช้อยู่จะถูกปิด หากต้องการเปิด localhost กลับ ให้รัน & "$env:ProgramFiles\\SynaptaConnect\\synapta-connect.exe" panel --enable-local ใน PowerShell บนเครื่องที่ติดตั้ง'
+          ? 'ช่องทางที่กำลังใช้อยู่จะถูกปิด หากต้องการเปิด localhost กลับ ให้รัน ' + panelCommand + ' --enable-local ใน PowerShell บนเครื่องที่ติดตั้ง'
           : desktop ? 'เครื่องที่กำลังเชื่อมต่ออาจต้องใช้พอร์ตใหม่' : 'เครื่องที่กำลังเชื่อมต่ออาจต้องใช้พอร์ตใหม่ และหน้าจัดการจะย้ายไปพอร์ตใหม่เมื่อบันทึกสำเร็จ',
         label: 'บันทึกและใช้ค่าใหม่',
         run,
