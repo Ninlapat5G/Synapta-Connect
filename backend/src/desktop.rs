@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use synapta_connect::{desktop_ipc, helper, open_panel, winsvc};
+use tauri::Manager;
 
 #[tauri::command]
 async fn agent_request(method: String, path: String, body: Option<Value>) -> Result<desktop_ipc::Reply, String> {
@@ -60,6 +61,17 @@ pub fn run() -> tauri::Result<()> {
         }
     }
     tauri::Builder::default()
+        .setup(|app| {
+            // The desktop shortcut uses "Run: Minimized" to hide the console, and Windows applies that state to the
+            // first ShowWindow of this process too, so the app opened minimized and looked like it never started.
+            // The window is created hidden (tauri.conf.json) and shown here, then restored and focused explicitly.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             agent_request,
             service_status,
