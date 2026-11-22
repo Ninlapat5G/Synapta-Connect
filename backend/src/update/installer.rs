@@ -141,7 +141,7 @@ pub fn installed_version(layout: &Layout) -> Option<String> {
     installed_version_from(&layout.install_json())
 }
 
-fn installed_version_from(path: &Path) -> Option<String> {
+pub(crate) fn installed_version_from(path: &Path) -> Option<String> {
     fsutil::read_json::<InstallInfo>(path).map(|i| i.version)
 }
 

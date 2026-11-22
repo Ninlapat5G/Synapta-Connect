@@ -495,11 +495,16 @@ impl UpdateManager {
 
     /// ทำงานตลอดอายุ agent (เฉพาะโหมด service): รับผลจากตัวติดตั้ง, ตรวจตามรอบ, ติดตั้งเองถ้าเปิดไว้
     pub async fn run_scheduler(self: Arc<Self>) {
-        tokio::time::sleep(Duration::from_secs(120)).await; // ให้ระบบนิ่งหลังบูตก่อนใช้เครือข่าย
+        let started = Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tick.tick().await;
+            // รับผลตั้งแต่แรก: ตัวติดตั้งเขียนผลหลังตรวจสุขภาพ agent ตัวใหม่ จึงมาถึงหลังจุดที่ agent อ่านตอนเริ่มเสมอ
+            // (เดิมรอ 2 นาทีก่อนอ่าน หน้าอัปเดตเลยค้างที่ "กำลังติดตั้ง" ทั้งที่ติดตั้งเสร็จแล้ว)
             self.ingest_result();
+            if started.elapsed() < Duration::from_secs(120) {
+                continue; // ให้ระบบนิ่งหลังบูตก่อนใช้เครือข่าย
+            }
             let settings = self.settings.get();
             if !settings.update.auto_update || self.source().is_err() {
                 continue;

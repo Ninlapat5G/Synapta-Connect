@@ -22,27 +22,42 @@ const RETRY_MAX: Duration = Duration::from_secs(60);
 /// รันจนกว่าจะอ่าน token ไม่ได้ (ไม่ใช่เจ้าของ / ถอนการติดตั้งแล้ว)
 pub async fn run() -> anyhow::Result<()> {
     #[cfg(windows)]
-    if !claim_session() {
+    if !claim_session(handed_off()) {
         return Ok(()); // มี helper ใน session นี้อยู่แล้ว
     }
     let data_dir = service_data_dir();
     let token_file = data_dir.join("local_token");
-    // อ่าน token ได้ = เป็นเจ้าของ จึงสร้างไอคอนเปิด panel ให้ (ทำเบื้องหลัง ไม่ให้ช้า helper)
+    // อ่าน token ได้ = เป็นเจ้าของ จึงสร้างไอคอนเปิด panel และไอคอนมุมจอให้ (ทำเบื้องหลัง ไม่ให้ช้า helper)
     #[cfg(windows)]
     if std::fs::File::open(&token_file).is_ok() {
         std::thread::spawn(crate::shortcut::ensure_for_current_user);
+        crate::tray::start();
     }
+    let result = serve(&data_dir, &token_file).await;
+    #[cfg(windows)]
+    crate::tray::stop();
+    result
+}
+
+async fn serve(data_dir: &std::path::Path, token_file: &std::path::Path) -> anyhow::Result<()> {
     let mut wait = RETRY_MIN;
     loop {
+        #[cfg(windows)]
+        if newer_version_installed() {
+            // เอาไอคอนมุมจอออกก่อน ตัวใหม่จะใส่ของตัวเอง — ไม่ให้มีสองไอคอนซ้อนกัน
+            crate::tray::stop();
+            start_in_this_session_as(true);
+            return Ok(());
+        }
         // อ่านใหม่ทุกรอบ: service สุ่ม token ใหม่ทุกครั้งที่เริ่ม
-        let Ok(token) = std::fs::read_to_string(&token_file) else {
+        let Ok(token) = std::fs::read_to_string(token_file) else {
             return Ok(()); // ไม่มีสิทธิ์อ่าน = ผู้ใช้นี้ไม่ใช่เจ้าของ (หรือยังไม่ได้ติดตั้ง) ไม่ใช่ความผิดพลาด
         };
         if !proof::valid_local_token(token.trim()) {
             tokio::time::sleep(RETRY_MIN).await;
             continue;
         }
-        let port = panel_port(&data_dir).unwrap_or_else(|| Ports::default().local_port);
+        let port = panel_port(data_dir).unwrap_or_else(|| Ports::default().local_port);
         match session(port, token.trim()).await {
             Ok(()) => wait = RETRY_MIN, // เคยต่อได้แล้วหลุด (service รีสตาร์ท) ลองใหม่ถี่ ๆ
             Err(e) => {
@@ -86,6 +101,8 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
     };
     sink.send(Message::Text(json!({"hello": me}).to_string().into()))
         .await?;
+    #[cfg(windows)]
+    let _online = Online::mark();
 
     // งานแต่ละตัวทำแยกกัน (จับภาพช้าต้องไม่ขวางการคลิก) ผลกลับผ่านคิวเดียวไปยังตัวเขียน socket
     let (out, mut replies) = mpsc::channel::<String>(16);
@@ -102,6 +119,25 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
             },
             Some(reply) = replies.recv() => sink.send(Message::Text(reply.into())).await?,
         }
+    }
+}
+
+/// สถานะบนไอคอนมุมจอ: ต่อ Agent ได้ตลอดอายุของค่านี้ หลุดเมื่อ session จบไม่ว่าทางไหน
+#[cfg(windows)]
+struct Online;
+
+#[cfg(windows)]
+impl Online {
+    fn mark() -> Online {
+        crate::tray::set_online(true);
+        Online
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Online {
+    fn drop(&mut self) {
+        crate::tray::set_online(false);
     }
 }
 
@@ -126,22 +162,59 @@ async fn handle(text: &str) -> String {
 
 /// helper ได้ทีละตัวต่อ session — service ปฏิเสธตัวที่สอง ซึ่งจะวนต่อใหม่ไปเรื่อย ๆ จึงเลิกตั้งแต่ต้น
 /// (mutex ใน namespace `Local\` แยกตาม session; handle ไม่ปิด ถือไว้จนโปรเซสจบ)
+/// `wait`: ตัวที่รับช่วงจาก helper รุ่นเก่ารอให้ตัวเก่าออกก่อน แทนที่จะเลิกทันที
 #[cfg(windows)]
-fn claim_session() -> bool {
-    use windows::{
-        Win32::{
-            Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
-            System::Threading::CreateMutexW,
-        },
-        core::w,
+fn claim_session(wait: bool) -> bool {
+    let wait = Duration::from_secs(if wait { 15 } else { 0 });
+    // HANDLE ที่ได้ถูกทิ้งไว้เปิดโดยตั้งใจ: mutex ต้องอยู่จนโปรเซสนี้จบ
+    claim_mutex(windows::core::w!(r"Local\SynaptaConnectHelper"), wait).is_some()
+}
+
+/// None = มีตัวอื่นถือ mutex อยู่จนหมดเวลารอ · สร้าง mutex ไม่ได้เลยถือว่าได้ (แย่สุดคือมีตัวสำรองรออยู่)
+#[cfg(windows)]
+fn claim_mutex(name: windows::core::PCWSTR, wait: Duration) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE},
+        System::Threading::CreateMutexW,
     };
-    match unsafe { CreateMutexW(None, false, w!("Local\\SynaptaConnectHelper")) } {
-        Ok(_) => {
-            let error = unsafe { GetLastError() };
-            error != ERROR_ALREADY_EXISTS
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match unsafe { CreateMutexW(None, false, name) } {
+            Ok(handle) => {
+                if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+                    return Some(handle);
+                }
+                // ต้องปิด handle ที่ได้มา ไม่งั้น mutex ไม่มีวันหายแม้ตัวเก่าจะออกไปแล้ว
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+            }
+            Err(_) => return Some(HANDLE::default()),
         }
-        Err(_) => true, // สร้าง mutex ไม่ได้ก็ยังทำงานได้ — แย่สุดคือมีตัวสำรองรออยู่
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// ตัวแปรที่ helper รุ่นเก่าใส่ให้ตัวที่รับช่วง — ตัวที่รับช่วงแล้วไม่ส่งต่ออีก จึงไม่มีทางวนสร้างโปรเซสไม่รู้จบ
+const HANDOFF_ENV: &str = "SYNAPTA_HELPER_HANDOFF";
+
+fn handed_off() -> bool {
+    std::env::var_os(HANDOFF_ENV).is_some()
+}
+
+/// helper อยู่ยาวตลอดการล็อกอิน แต่ตัวอัปเดตสลับไฟล์ใต้มันได้ — ตัวเก่าจะรันโค้ดเก่าต่อไปจนล็อกเอาต์
+/// (input/จับภาพ/ไอคอนไม่ได้ของที่แก้ในรุ่นใหม่) จึงต้องเปลี่ยนตัวเองเป็นรุ่นที่ติดตั้งอยู่
+#[cfg(windows)]
+fn newer_version_installed() -> bool {
+    let dir = crate::winsvc::install::install_dir();
+    let installed_here = std::env::current_exe().is_ok_and(|exe| exe.starts_with(&dir));
+    installed_here
+        && !handed_off()
+        && crate::update::installer::installed_version_from(&dir.join("install.json"))
+            .is_some_and(|version| version != env!("CARGO_PKG_VERSION"))
 }
 
 /// เริ่ม helper ของ service ใน session นี้ (ตัวที่ติดตั้งไว้ใน Program Files) — มีอยู่แล้วตัวใหม่จะเลิกเอง
@@ -150,6 +223,11 @@ fn claim_session() -> bool {
 /// `panel` ซึ่งรันด้วยบัญชีเจ้าของใน session นั้นอยู่แล้วจึงเรียกตัวนี้แทน
 #[cfg(windows)]
 pub fn start_in_this_session() {
+    start_in_this_session_as(false);
+}
+
+#[cfg(windows)]
+fn start_in_this_session_as(handoff: bool) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -159,7 +237,13 @@ pub fn start_in_this_session() {
     }
     // กับดัก: stdio ต้องเป็น null — ถ้าสืบทอด pipe ของผู้เรียก (เช่นตัวติดตั้งที่อ่าน output ของ `panel` จนจบ)
     // helper ที่อยู่ยาวจะถือ pipe ไว้ ทำให้ผู้เรียกรอไม่มีวันจบ
-    let _ = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    if handoff {
+        command.env(HANDOFF_ENV, "1");
+    } else {
+        command.env_remove(HANDOFF_ENV);
+    }
+    let _ = command
         .arg("helper")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -181,4 +265,36 @@ fn session_id() -> u32 {
 #[cfg(not(windows))]
 fn session_id() -> u32 {
     0
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use windows::{
+        Win32::Foundation::CloseHandle,
+        core::{HSTRING, PCWSTR},
+    };
+
+    #[test]
+    fn handoff_waits_for_the_old_helper_to_release_the_session() {
+        let name = HSTRING::from(format!(r"Local\SynaptaConnectHelperTest-{}", crate::hex::random_id(8)));
+        let old = claim_mutex(PCWSTR(name.as_ptr()), Duration::ZERO).expect("first claim");
+        assert!(
+            claim_mutex(PCWSTR(name.as_ptr()), Duration::ZERO).is_none(),
+            "a second helper must not run"
+        );
+
+        let waiting = std::thread::spawn({
+            let name = name.clone();
+            move || claim_mutex(PCWSTR(name.as_ptr()), Duration::from_secs(5)).is_some()
+        });
+        std::thread::sleep(Duration::from_millis(600));
+        unsafe {
+            let _ = CloseHandle(old);
+        }
+        assert!(
+            waiting.join().unwrap(),
+            "the new helper takes over once the old one exits"
+        );
+    }
 }

@@ -359,7 +359,10 @@ mod tests {
             async move { open(&name).await }
         });
         sleep(Duration::from_millis(150)).await;
-        assert!(!second.is_finished(), "the only instance is taken, so the second client must wait");
+        assert!(
+            !second.is_finished(),
+            "the only instance is taken, so the second client must wait"
+        );
         let _next = create(&name, false).unwrap();
         let second = timeout(Duration::from_secs(2), second).await.unwrap().unwrap();
         assert!(second.is_ok());

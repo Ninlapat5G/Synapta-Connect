@@ -9,8 +9,8 @@
 - **บั๊กจริงบน app01:** คำสั่ง `panel` บอกว่าเปิดแล้วแต่เบราว์เซอร์ไม่ขึ้น — UserChoice ของ http เป็น Edge รุ่นเก่า (AppX) ที่ไม่มีบน Server
   Windows จึงถามว่าจะเปิดด้วยอะไร รหัส 60 วินาทีหมดก่อนผู้ใช้เลือก แก้ใน `open_panel.rs`: นับเฉพาะ ProgId ที่ไม่ใช่ IE/AppX
   ไม่งั้นเปิด Chrome/Edge/Firefox ตรง ๆ และพิมพ์ลิงก์ไว้ให้คัดลอกเปิดเองด้วย
-- ไอคอน **Synapta Connect** บน Desktop/Start Menu ของเจ้าของ (`src/shortcut.rs`) รัน `panel --gui` — helper สร้างให้ครั้งเดียว
-  (ครอบคลุมเครื่องที่อัปเดตอัตโนมัติ), `uninstall` ลบของทุกโปรไฟล์ · `--gui` แจ้ง error เป็น MessageBox เพราะ console ของ Server 2016 แสดงไทยเป็นกล่อง
+- ไอคอน **Synapta Connect** บน Desktop/Start Menu ของเจ้าของ (`src/shortcut.rs`) รัน `panel --gui` — helper สร้างให้ครั้งละรุ่น
+  (ไอคอนที่หายไปกลับมาเมื่ออัปเดต · ตั้งแต่ 0.3.11 helper รุ่นเก่าส่งต่อให้รุ่นที่ติดตั้งใหม่เองหลังอัปเดต), `uninstall` ลบของทุกโปรไฟล์ · `--gui` แจ้ง error เป็น MessageBox เพราะ console ของ Server 2016 แสดงไทยเป็นกล่อง
 - หน้า panel ที่ล็อกอยู่บอกให้ดับเบิลคลิกไอคอนก่อน คำสั่ง PowerShell เป็นทางสำรอง
 - RPC `update.status` / `update.check` / `update.install` (`src/update/remote.rs`) ให้ SynaptaCode สั่งอัปเดตได้ ฝั่ง SynaptaCode ยังต้องทำปุ่ม/เครื่องมือเรียก
 - **ยังไม่ได้ทดสอบ:** ไอคอนและ `--gui` บนเครื่องจริง (ทดสอบแค่สคริปต์สร้าง .lnk บนเครื่อง dev), `update.install` ข้ามเครื่องจริง

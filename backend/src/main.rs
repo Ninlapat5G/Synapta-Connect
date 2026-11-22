@@ -5,7 +5,14 @@ use tracing_subscriber::EnvFilter;
 mod desktop;
 
 fn main() {
-    let command = cli::parse(std::env::args().skip(1).collect()).unwrap_or_else(|e| {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Double-clicking the exe in Explorer used to start a second Agent in a console window, which owners
+    // mistook for the app. A terminal shares its console with us, so only an Explorer launch opens Desktop.
+    #[cfg(all(windows, feature = "desktop"))]
+    if args.is_empty() && owns_console() {
+        std::process::exit(launch_desktop());
+    }
+    let command = cli::parse(args).unwrap_or_else(|e| {
         eprintln!("{e}\n\n{}", cli::USAGE);
         std::process::exit(2);
     });
@@ -75,6 +82,10 @@ fn run(command: Command) -> i32 {
 fn launch_desktop() -> i32 {
     #[cfg(all(windows, feature = "desktop"))]
     {
+        // เปิดอยู่แล้ว (จากไอคอนมุมจอ/ทางลัด/ดับเบิลคลิก exe) ดึงหน้าต่างเดิมขึ้นมาแทนการเปิดหน้าต่างที่สอง
+        if synapta_connect::tray::focus_desktop() {
+            return 0;
+        }
         match desktop::run() {
             Ok(()) => return 0,
             Err(error) => {
@@ -89,6 +100,13 @@ fn launch_desktop() -> i32 {
     #[cfg(not(all(windows, feature = "desktop")))]
     eprintln!("รุ่นนี้ไม่มี Synapta Connect Desktop ให้ใช้คำสั่ง synapta-connect panel");
     1
+}
+
+/// Windows created this console just for us (Explorer or a shortcut), rather than a terminal we run inside.
+#[cfg(all(windows, feature = "desktop"))]
+fn owns_console() -> bool {
+    use windows::Win32::System::Console::GetConsoleProcessList;
+    unsafe { GetConsoleProcessList(&mut [0; 2]) == 1 }
 }
 
 fn block_on(future: impl std::future::Future<Output = i32>) -> i32 {

@@ -3,13 +3,13 @@
 //! ไอคอนรัน `synapta-connect.exe panel --gui` เพื่อเปิด Desktop ในรุ่นที่มี Tauri
 //! จึงไม่ต้องคัดลอกคำสั่งไปวางใน PowerShell และไม่ได้ลดความปลอดภัยลง
 //! helper สร้างให้ตอนเริ่ม (helper รันด้วยบัญชีเจ้าของ จึงเขียนโฟลเดอร์ของเจ้าของได้ และได้ทั้งเครื่องที่อัปเดตอัตโนมัติ
-//! ซึ่งไม่ผ่านขั้น install) — สร้างครั้งเดียว ถ้าเจ้าของลบทิ้งเองจะไม่สร้างซ้ำ
+//! ซึ่งไม่ผ่านขั้น install) — สร้างใหม่ครั้งเดียวต่อรุ่น: ไอคอนที่หายไปกลับมาเมื่ออัปเดต แต่ไม่ถูกสร้างซ้ำทุกครั้งที่ล็อกอิน
 
 use base64::Engine;
 use std::{os::windows::process::CommandExt, path::Path, process::Command};
 
 const LINK: &str = "Synapta Connect.lnk";
-/// มีไฟล์นี้ = เคยสร้างไอคอนให้ผู้ใช้นี้แล้ว
+/// เก็บเลขรุ่นที่สร้างไอคอนล่าสุด — รุ่นเดิมไม่สร้างซ้ำ (ไฟล์ว่างจากรุ่นก่อน 0.3.11 ถือว่ายังไม่สร้าง)
 const MARKER: &str = "shortcut-created";
 
 fn marker_path() -> Option<std::path::PathBuf> {
@@ -40,11 +40,16 @@ fn powershell(script: &str) -> Result<(), String> {
 /// สร้างไอคอนให้ผู้ใช้ที่รันโปรเซสนี้ (เรียกจาก helper หลังยืนยันว่าเป็นเจ้าของ) — ล้มเหลวก็แค่บันทึก log
 pub fn ensure_for_current_user() {
     let Some(marker) = marker_path() else { return };
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(running) = std::env::current_exe() else { return };
+    let install_dir = crate::winsvc::install::install_dir();
     // เฉพาะตัวที่ติดตั้งแล้ว — exe ที่รันจากโฟลเดอร์ build/ดาวน์โหลดไม่ควรทิ้งไอคอนชี้ไปที่ชั่วคราว
-    if marker.exists() || !exe.starts_with(crate::winsvc::install::install_dir()) {
+    let version = env!("CARGO_PKG_VERSION");
+    let done = std::fs::read_to_string(&marker).is_ok_and(|recorded| recorded.trim() == version);
+    if done || !running.starts_with(&install_dir) {
         return;
     }
+    // ชี้ไปที่ไฟล์ที่ติดตั้ง ไม่ใช่ตัวที่กำลังรัน — หลังอัปเดต ตัวที่รันอยู่อาจเป็นไฟล์เก่าที่ถูกเปลี่ยนชื่อไปแล้ว
+    let exe = install_dir.join(crate::update::installer::EXE_NAME);
     let exe = exe.display().to_string().replace('\'', "''");
     let script = format!(
         "$ErrorActionPreference = 'Stop'; $shell = New-Object -ComObject WScript.Shell; \
@@ -56,7 +61,7 @@ pub fn ensure_for_current_user() {
     match powershell(&script) {
         Ok(()) => {
             let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
-            let _ = std::fs::write(&marker, b"");
+            let _ = std::fs::write(&marker, version);
         }
         Err(e) => tracing::warn!("สร้างไอคอน Synapta Connect ไม่ได้: {e}"),
     }
