@@ -172,8 +172,11 @@ PTY เป็นของ WebSocket ที่เปิด — **ปิด connec
 
 #### ส่งไฟล์ (SHA-256, ต่อจากที่ค้างได้)
 **อัปโหลด**
-1. `transfer.begin` `{"path": "<absolute path>", "size": N, "sha256": "<hex>", "overwrite"?: false}`
+1. `transfer.begin` `{"path": "<absolute path>", "size": N, "sha256": "<hex>", "overwrite"?: false, "operation_id"?: "<1-64 ตัวอักษร>"}`
    → `{"transfer_id", "offset", "chunk_size": 524288, "max_chunk_size": 1048576, "resumed": bool}`
+   `operation_id` (ตั้งแต่ v0.3.6) = รหัสงานหนึ่งงานของ client ใช้ซ้ำทุกครั้งที่ลองใหม่ · ถ้ามีอีกงานที่ `operation_id` ต่างกัน
+   กำลังเขียนปลายทางเดียวกันอยู่ (มี chunk เข้ามาภายใน 120 วินาที) = error `-32002` · `operation_id` เดิม = ทิ้ง `transfer_id` เก่าแล้วต่อจากที่ค้าง ·
+   ไม่ส่ง = ทำแบบเดิม (ไม่ตรวจการชนกัน)
 2. `PUT /api/v1/transfers/{transfer_id}?offset=<offset>` body = ไบต์ดิบของ chunk (64 KiB–1 MiB) → `{"offset": <ไบต์ที่ได้รับรวมแล้ว>}`
    `offset` ต้อง **เท่ากับ** ที่ agent มีอยู่พอดี ไม่งั้น `409`
 3. `transfer.finish` `{"transfer_id"}` → ตรวจ SHA-256 ทั้งไฟล์ แล้ว rename เป็นไฟล์จริงแบบ atomic → `{"path","size","sha256"}`
@@ -185,6 +188,16 @@ PTY เป็นของ WebSocket ที่เปิด — **ปิด connec
 
 **ดาวน์โหลด**: `transfer.stat` `{"path"}` → `{"size","sha256","modified"}` แล้ว `GET /api/v1/files?path=<URL-encoded>`
 ต่อจากที่ค้างด้วย `Range: bytes=N-` (ตอบ `206`) แล้วเทียบ SHA-256 เอง
+
+#### เปิดดูไฟล์ (ตั้งแต่ v0.3.6)
+`file.open_path` `{"path"?, "limit"?: 100, "cursor"?, "preview"?: false}` (`backend/src/browse.rs`)
+- ไม่ใส่ `path` → `{"kind": "roots", "entries": [...]}` = ทุกไดรฟ์ (Windows) / `/` หรือโฟลเดอร์ใน `--file-root`
+- `path` เป็นโฟลเดอร์ → `{"kind": "directory", "path", "parent": <path|null>, "entries": [...], "next_cursor"?}` โฟลเดอร์ก่อนไฟล์ เรียงชื่อไม่สนตัวพิมพ์
+  หน้าละไม่เกิน 100 รายการ ขอหน้าถัดไปด้วย `cursor` = `next_cursor` · ที่ root ที่อนุญาตหรือรากไดรฟ์ `parent` เป็น `null`
+- `path` เป็นไฟล์ → `{"kind": "file", "path", "name", "size", "text_preview"?, "preview_truncated"?}` พรีวิวเมื่อส่ง `preview: true`
+  และเป็นข้อความ (UTF-8 หรือ UTF-16 ที่มี BOM) อ่านต้นไฟล์ไม่เกิน 16 KiB
+- entry = `{"name", "path", "kind": "directory"|"file", "size"?}` · path ที่ส่งกลับไม่มี prefix `\\?\` ใช้ต่อกับ `exec.run`/`transfer.*` ได้ตรง ๆ
+- ฟิลด์ที่ไม่มีค่าจะไม่ถูกส่ง (ไม่ใช่ `null`) ตามสัญญา `connectPathResult` ของ SynaptaCode
 
 **กฎ path** (`backend/src/file_access.rs`): ทุก path ถูก `canonicalize` ก่อนใช้ (ตาม symlink, `.`, `..` แล้ว) ·
 path เขียนต้องเป็น absolute, **ห้ามมี `..`**, ห้ามเป็น symlink · ถ้าเปิด agent ด้วย `--file-root <โฟลเดอร์>` (ซ้ำได้)

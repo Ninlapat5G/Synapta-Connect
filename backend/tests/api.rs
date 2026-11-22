@@ -537,6 +537,64 @@ async fn upload_resumes_verifies_checksum_and_downloads_by_range() {
 }
 
 #[tokio::test]
+async fn concurrent_uploads_to_one_destination_are_refused_by_operation_id() {
+    let a = start_paired().await;
+    let dest = a.dir.join("shared.bin").to_string_lossy().to_string();
+    let begin = |op: Option<&str>| {
+        let mut params = json!({"path": dest, "size": 4, "sha256": "0".repeat(64)});
+        if let Some(op) = op {
+            params["operation_id"] = json!(op);
+        }
+        a.rpc_raw("transfer.begin", params)
+    };
+    let first = begin(Some("a1")).await;
+    assert!(first.get("error").is_none(), "{first}");
+    // งานอื่นเขียนที่เดียวกันระหว่างงานแรกยังเดิน = ปฏิเสธ
+    let other = begin(Some("b2")).await;
+    assert_eq!(other["error"]["code"], -32002, "{other}");
+    // งานเดิมลองใหม่ = ได้ และ transfer_id เก่าใช้ไม่ได้แล้ว
+    let retry = begin(Some("a1")).await;
+    assert!(retry.get("error").is_none(), "{retry}");
+    let old = first["result"]["transfer_id"].as_str().unwrap();
+    let r = a.rpc_raw("transfer.abort", json!({"transfer_id": old})).await;
+    assert!(r.get("error").is_some(), "transfer_id ของรอบก่อนต้องถูกทิ้ง: {r}");
+    // client รุ่นเก่า (ไม่มี operation_id) ทำงานแบบเดิม
+    assert!(begin(None).await.get("error").is_none());
+}
+
+#[tokio::test]
+async fn open_path_lists_roots_folders_and_previews_files() {
+    let a = start_paired().await;
+    let roots = a.call("file.open_path", json!({})).await;
+    assert_eq!(roots["kind"], "roots");
+    assert!(!roots["entries"].as_array().unwrap().is_empty());
+
+    let folder = a.dir.join("browse");
+    std::fs::create_dir_all(folder.join("sub")).unwrap();
+    std::fs::write(folder.join("note.txt"), "hello").unwrap();
+    let listing = a
+        .call(
+            "file.open_path",
+            json!({"path": folder.to_string_lossy(), "limit": 100}),
+        )
+        .await;
+    assert_eq!(listing["kind"], "directory");
+    let names: Vec<_> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("sub"), json!("note.txt")]);
+
+    let file = listing["entries"][1]["path"].as_str().unwrap();
+    let opened = a.call("file.open_path", json!({"path": file, "preview": true})).await;
+    assert_eq!(opened["kind"], "file");
+    assert_eq!(opened["size"], 5);
+    assert_eq!(opened["text_preview"], "hello");
+}
+
+#[tokio::test]
 async fn file_access_is_confined_to_roots_after_canonicalize() {
     let base = std::env::temp_dir().join(format!("synapta-roots-{}", random_id(4)));
     std::fs::create_dir_all(base.join("root")).unwrap();

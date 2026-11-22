@@ -4,7 +4,7 @@
 
 use crate::{
     app::App,
-    display, exec, netif, profile, pty,
+    browse, display, exec, netif, profile, pty,
     rpc::{METHOD_NOT_FOUND, NOT_AVAILABLE, Res, RpcError, parse, to_value},
 };
 use serde::Deserialize;
@@ -57,6 +57,8 @@ pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<
         "pty.write" => ws()?.ptys.write(parse(params)?).and_then(|_| ok()),
         "pty.resize" => ws()?.ptys.resize(parse(params)?).and_then(|_| ok()),
         "pty.close" => ws()?.ptys.close(parse(params)?).and_then(|_| ok()),
+
+        "file.open_path" => browse::open_path(parse(params)?, &app.config.file_roots).await,
 
         "transfer.begin" | "transfer.finish" | "transfer.abort" | "transfer.stat" => {
             app.transfers.rpc(method, params).await

@@ -16,16 +16,22 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 /// ขนาด chunk ที่แนะนำ (client ใช้ 64 KiB – 1 MiB ได้ ตัวเลขนี้คือค่ากลางที่ดีบน LAN/VPN)
 pub const CHUNK_SIZE: u64 = 512 * 1024;
 pub const MAX_CHUNK: usize = 1024 * 1024;
+/// งานอัปโหลดที่ไม่มี chunk เข้ามานานเท่านี้ถือว่าทิ้งแล้ว — งานใหม่ที่ operation_id ต่างกันเขียนทับที่เดิมได้
+const STALE_UPLOAD: Duration = Duration::from_secs(120);
 
 struct Upload {
     path: PathBuf,
     size: u64,
     sha256: String,
+    /// รหัสงานจาก client (SynaptaCode ส่งมาตั้งแต่ v1.0.101) — None = client รุ่นเก่า
+    operation_id: Option<String>,
+    touched: Instant,
 }
 
 pub struct Transfers {
@@ -41,6 +47,7 @@ struct BeginParams {
     sha256: String,
     #[serde(default)]
     overwrite: bool,
+    operation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +83,15 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
     }
 }
 
+/// เทียบปลายทางเดียวกันไหม — Windows ไม่สนตัวพิมพ์
+fn same_target(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
 fn unknown(id: &str) -> RpcError {
     RpcError::new(
         CONFLICT,
@@ -106,6 +122,12 @@ impl Transfers {
         if p.sha256.len() != 64 || !p.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(RpcError::invalid("sha256 ต้องเป็น hex 64 ตัวอักษร"));
         }
+        if p.operation_id.as_ref().is_some_and(|op| op.is_empty() || op.len() > 64) {
+            return Err(RpcError::invalid("operation_id ต้องยาว 1-64 ตัวอักษร"));
+        }
+        // ถือ lock ตั้งแต่ตรวจจนบันทึกงาน — สอง begin ที่มาพร้อมกันต้องเห็นกันเสมอ
+        let mut uploads = self.uploads.lock().unwrap();
+        claim_target(&mut uploads, &path, p.operation_id.as_deref())?;
         if path.is_dir() || (path.exists() && !p.overwrite) {
             return Err(RpcError::new(CONFLICT, "ปลายทางมีอยู่แล้ว (ส่ง overwrite:true ถ้าต้องการทับ)"));
         }
@@ -124,12 +146,14 @@ impl Transfers {
             .open(part_path(&path))?;
 
         let id = random_id(8);
-        self.uploads.lock().unwrap().insert(
+        uploads.insert(
             id.clone(),
             Upload {
                 path,
                 size: p.size,
                 sha256: p.sha256.to_lowercase(),
+                operation_id: p.operation_id,
+                touched: Instant::now(),
             },
         );
         Ok(json!({"transfer_id": id, "offset": offset, "chunk_size": CHUNK_SIZE,
@@ -139,8 +163,9 @@ impl Transfers {
     /// เขียน chunk ต่อท้ายไฟล์ — offset ต้องตรงกับที่ได้รับไปแล้วพอดี (ส่งซ้ำ/ข้ามไม่ได้)
     pub async fn put_chunk(&self, id: &str, offset: u64, data: Vec<u8>) -> Res<Value> {
         let path = {
-            let map = self.uploads.lock().unwrap();
-            let up = map.get(id).ok_or_else(|| unknown(id))?;
+            let mut map = self.uploads.lock().unwrap();
+            let up = map.get_mut(id).ok_or_else(|| unknown(id))?;
+            up.touched = Instant::now();
             if offset + data.len() as u64 > up.size {
                 return Err(RpcError::invalid("chunk เกินขนาดไฟล์ที่ประกาศไว้"));
             }
@@ -201,6 +226,32 @@ impl Transfers {
         let _ = std::fs::remove_file(part_path(&up.path));
         Ok(json!({"aborted": true}))
     }
+}
+
+/// กันสองงานเขียน `<path>.synapta-part` ไฟล์เดียวกันพร้อมกัน (ไฟล์จะปนกันจน checksum ผิดทั้งคู่)
+/// - operation_id เดียวกัน = client ลองใหม่หลังสัญญาณหลุด: ทิ้ง transfer_id เก่า ใช้ไฟล์ค้างต่อ
+/// - operation_id ต่างกันและงานเดิมยังเดินอยู่ = ปฏิเสธ; งานเดิมเงียบเกิน STALE_UPLOAD = ยึดต่อได้
+/// - ฝั่งใดไม่มี operation_id (client รุ่นเก่า) = ทำแบบเดิม ไม่ตรวจ เพื่อไม่ทำให้การ resume ของรุ่นเก่าพัง
+fn claim_target(uploads: &mut HashMap<String, Upload>, path: &Path, operation: Option<&str>) -> Res<()> {
+    let Some(operation) = operation else { return Ok(()) };
+    let mut replaced = Vec::new();
+    for (id, up) in uploads.iter() {
+        let Some(other) = up.operation_id.as_deref() else {
+            continue;
+        };
+        if !same_target(&up.path, path) {
+            continue;
+        }
+        if other == operation || up.touched.elapsed() >= STALE_UPLOAD {
+            replaced.push(id.clone());
+        } else {
+            return Err(RpcError::new(CONFLICT, "มีอีกงานกำลังส่งไฟล์ไปที่ปลายทางนี้ — รอให้เสร็จก่อน"));
+        }
+    }
+    for id in replaced {
+        uploads.remove(&id);
+    }
+    Ok(())
 }
 
 /// `path` ผ่าน file_access::for_read มาแล้ว (canonical, เป็นไฟล์, อยู่ใน root)

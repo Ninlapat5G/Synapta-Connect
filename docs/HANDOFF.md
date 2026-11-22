@@ -1,8 +1,20 @@
-# Synapta Connect — เอกสารส่งต่องาน v0.3.5
+# Synapta Connect — เอกสารส่งต่องาน v0.3.6
 
 ภาพรวมการออกแบบ: `docs/SERVICE_AND_UPDATE.md` · สัญญา panel: `docs/PANEL_API.md` · การเผยแพร่: `docs/RELEASE.md` · license ส่วนประกอบ: `docs/THIRD_PARTY.md`
 
 ## 1. สถานะ
+
+### รอบ v0.3.6 (2026-11-22) — รองรับหน้าเปิดดูไฟล์ของ SynaptaCode
+
+ตามงานของ Codex ฝั่ง SynaptaCode (FilesTab ใหม่, เครื่องมือ MCP `connect_open_path`, ล็อกปลายทางตอนอัปโหลด)
+
+- เพิ่ม RPC `file.open_path` (`backend/src/browse.rs`): รายการไดรฟ์ / โฟลเดอร์ทีละหน้า (100 รายการ, cursor) / ข้อมูลไฟล์ + พรีวิวข้อความ 16 KiB
+  รูปผลลัพธ์ตรงกับ `connectPathResult` ใน `SynaptaCode/server/src/connect/schemas.ts` — ฟิลด์ว่างต้องไม่ส่ง (zod ไม่รับ null)
+  agent รุ่นเก่าตอบ -32601 แล้ว SynaptaCode ขึ้นข้อความให้อัปเดต Connect
+- `transfer.begin` รับ `operation_id`: งานต่างรหัสเขียนปลายทางเดียวกันพร้อมกัน = -32002 (กันไฟล์ `.synapta-part` ปนกัน);
+  รหัสเดิม = ลองใหม่ ทิ้ง transfer_id เก่า; ไม่ส่งรหัส = ทำแบบเดิมเพื่อไม่ให้ SynaptaCode รุ่นเก่าพัง
+- path ที่ส่งกลับตัด prefix `\\?\` ของ canonicalize ออก (`file_access::display_path`)
+- **ยังไม่ได้ทดสอบ:** อัปเดตอัตโนมัติจริงจาก v0.3.5 → v0.3.6 บนเครื่องปลายทาง และหน้า Files ของ SynaptaCode กับ agent ตัวจริง (ทดสอบผ่าน integration test ของ agent เท่านั้น)
 
 ### รอบ v0.3.5 (2026-11-22) — รุ่นแรกที่อัปเดตตัวเองได้
 

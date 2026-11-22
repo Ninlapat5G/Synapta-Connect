@@ -27,6 +27,28 @@ pub fn for_read(path: &str, roots: &[PathBuf]) -> Res<PathBuf> {
     Ok(canonical)
 }
 
+/// path ที่จะเปิดดู (file.open_path): ต้องมีอยู่ เป็นไฟล์หรือโฟลเดอร์ และอยู่ใน root — คืน path แบบ canonical
+pub fn for_browse(path: &str, roots: &[PathBuf]) -> Res<PathBuf> {
+    let canonical = Path::new(path)
+        .canonicalize()
+        .map_err(|e| RpcError::invalid(format!("เปิด path ไม่ได้: {e}")))?;
+    inside_roots(&canonical, roots)?;
+    Ok(canonical)
+}
+
+/// path สำหรับส่งกลับ client: ตัด prefix `\\?\` ที่ canonicalize บน Windows เติมให้
+/// (client เอา path นี้ไปใช้ต่อกับ exec/transfer และ SynaptaCode ตรวจรูป path แบบปกติ)
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(local) = text.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
 /// path ของไฟล์ที่จะเขียน (ไฟล์/โฟลเดอร์แม่ยังไม่ต้องมี): absolute, ไม่มี `..`, ไม่ใช่ symlink, อยู่ใน root
 /// คืน path ที่ canonicalize ส่วนที่มีอยู่แล้ว — ยังไม่สร้างอะไรบนดิสก์ (ผู้เรียกสร้างโฟลเดอร์หลังผ่านการตรวจนี้)
 pub fn for_write(path: &str, roots: &[PathBuf]) -> Res<PathBuf> {
