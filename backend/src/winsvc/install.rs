@@ -604,7 +604,7 @@ fn uninstall_steps(out: &Out, keep_data: bool) -> usize {
 /// ปิด helper และ Desktop ที่ใช้ exe ที่กำลังจะถูกแทนที่หรือถอนการติดตั้ง
 fn stop_clients(exe: &Path) -> Result<(), String> {
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}' OR Name LIKE 'synapta-connect.exe.%'\" | Where-Object {{ ($_.ExecutablePath -eq '{0}' -or $_.ExecutablePath -like '{0}.*') -and $_.ProcessId -ne {1} -and $_.CommandLine -match '\\s(helper|desktop|panel\\s+--gui)\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"Name='{EXE_NAME}' OR Name LIKE 'synapta-connect.exe.%'\" | Where-Object {{ ($_.ExecutablePath -eq '{0}' -or $_.ExecutablePath -like '{0}.*') -and $_.ProcessId -ne {1} -and $_.CommandLine -match '\\s(helper(\\s+--handoff)?|desktop|panel\\s+--gui)\\s*$' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
         exe.display().to_string().replace('\'', "''"),
         std::process::id(),
     );

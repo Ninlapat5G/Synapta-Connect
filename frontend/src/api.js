@@ -17,6 +17,7 @@ export const routes = {
   network: LOCAL + '/network',
   reload: LOCAL + '/panel-reload',
   screen: LOCAL + '/screen-input',
+  commands: LOCAL + '/commands',
   restartWeb: LOCAL + '/restart-web',
   recoverWeb: LOCAL + '/recover-web',
   exchange: '/api/v1/panel/exchange',

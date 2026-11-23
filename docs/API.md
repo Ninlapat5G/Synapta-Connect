@@ -153,12 +153,18 @@ route ที่ต้องมีใบรับรองแต่ไม่ม�
 `exec.run` — params: `command` (จำเป็น), `shell?` (`powershell` โดยปริยายบน Windows | `cmd` | `sh` โดยปริยายบน Unix | `bash`),
 `cwd?`, `timeout_ms?` (โดยปริยาย 60000, สูงสุด 600000), `env?` (object), `stdin?` (ข้อความ)
 
-result: `{"stdout","stderr","exit_code","timed_out","truncated","duration_ms"}` · **timeout ฆ่าทั้งต้นไม้โปรเซส** (Windows: Job Object, Unix: process group — ยังไม่ได้ทดสอบบน Unix) แต่คำสั่งที่จบเองและตั้งใจเปิดโปรแกรมทิ้งไว้เบื้องหลังจะไม่ถูกฆ่า · `exit_code` เป็น `null` เมื่อโดนฆ่าเพราะ timeout ·
+result: `{"stdout","stderr","exit_code","timed_out","truncated","duration_ms","run_as"}` (`run_as` = `{"level","user"}` บัญชีที่รันจริง) · **timeout ฆ่าทั้งต้นไม้โปรเซส** (Windows: Job Object, Unix: process group — ยังไม่ได้ทดสอบบน Unix) แต่คำสั่งที่จบเองและตั้งใจเปิดโปรแกรมทิ้งไว้เบื้องหลังจะไม่ถูกฆ่า · `exit_code` เป็น `null` เมื่อโดนฆ่าเพราะ timeout ·
 stdout/stderr เก็บ 1 MiB แรกต่อ stream · ภาษาไทย/UTF-8 ผ่านได้ถูกต้อง
 
 บน Windows คำสั่งและ Terminal ใช้ CMD กับ Windows PowerShell จาก System32 โดยตรง เซสชันที่เปิดผ่าน Windows Service อ่าน `PATH`
 ระดับเครื่องล่าสุดทุกครั้งที่เปิด ในโหมด console จะคงลำดับค้นหาของโปรเซสเดิมและเพิ่มรายการล่าสุดของเครื่องและผู้ใช้ ส่วน `exec.run`
 สามารถระบุ `env.Path` เพื่อใช้ค่าเฉพาะคำสั่งได้
+
+**บัญชีที่รันคำสั่ง (Windows Service, ตั้งแต่ 0.3.14)** — `exec.run` และ `pty.*` ส่งให้ helper ใน session ของเจ้าของเครื่องรัน
+จึงได้บัญชี, PATH และไฟล์เดียวกับหน้าเครื่อง (บัญชี `NT SERVICE\SynaptaConnect` เขียนโฟลเดอร์ของเจ้าของไม่ได้ เช่น `flutter.bat`
+วนรอไฟล์ล็อกไม่รู้จบ) ไม่มีใครล็อกอิน = รันในบัญชี service เหมือนเดิม · เจ้าของปิดได้ที่ panel (`commands.run_as_owner`)
+· เปิด `commands.administrator` = ต้องได้ helper ระดับ administrator: helper ที่ยังไม่ elevated ขอ UAC บนหน้าจอเครื่อง
+(คำสั่งรอได้ถึง ~3 นาที) ไม่มี helper หรือไม่มีคนยืนยัน = error ไม่แอบรันด้วยสิทธิ์ที่ต่ำกว่า
 
 #### Terminal โต้ตอบ (PTY) — **เฉพาะ WebSocket**
 | method | params | result |

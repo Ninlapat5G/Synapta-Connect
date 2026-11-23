@@ -69,6 +69,7 @@ fn management(app: App) -> Router<App> {
         .route("/api/v1/local/web-update/retry", post(web_retry))
         .route("/api/v1/local/web-update/rollback", post(web_rollback))
         .route("/api/v1/local/screen-input", get(screen_input).put(set_screen_input))
+        .route("/api/v1/local/commands", get(commands).put(set_commands))
         .route("/api/v1/local/network", get(network_status).put(set_network))
         .route("/api/v1/local/panel-reload", post(panel_reload))
         .layer(middleware::from_fn_with_state(app, token_guard))
@@ -295,6 +296,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
             "pid": std::process::id(), "uptime_secs": app.started.elapsed().as_secs(),
         },
         "screen_input": screen_input_json(&app),
+        "commands": commands_json(&app),
         "network": network_json(&app),
     }))
 }
@@ -584,6 +586,64 @@ async fn set_screen_input(State(app): State<App>, Json(body): Json<EnabledBody>)
     tracing::warn!(enabled = body.enabled, "เจ้าของเปลี่ยนสิทธิ์จับภาพ/ส่ง input");
     match app.settings.update(|s| s.screen_input.enabled = body.enabled) {
         Ok(_) => Json(screen_input_json(&app)).into_response(),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "save_failed",
+            &format!("บันทึกค่าตั้งไม่ได้: {e}"),
+        ),
+    }
+}
+
+// ---------- คำสั่งรันด้วยบัญชีไหน (run_as.rs) ----------
+
+fn commands_json(app: &App) -> Value {
+    let settings = app.settings.get().commands;
+    let helper = app.display.helper_info();
+    json!({
+        "run_as_owner": settings.run_as_owner,
+        "administrator": settings.administrator,
+        "helper_connected": helper.is_some(),
+        "helper_user": helper.as_ref().map(|h| &h.user),
+        "helper_elevated": helper.as_ref().map(|h| h.elevated),
+    })
+}
+
+async fn commands(State(app): State<App>) -> Json<Value> {
+    Json(commands_json(&app))
+}
+
+#[derive(Deserialize)]
+struct CommandsBody {
+    run_as_owner: Option<bool>,
+    administrator: Option<bool>,
+}
+
+async fn set_commands(State(app): State<App>, Json(body): Json<CommandsBody>) -> Response {
+    tracing::warn!(run_as_owner = ?body.run_as_owner, administrator = ?body.administrator, "เจ้าของเปลี่ยนบัญชีที่ใช้รันคำสั่ง");
+    let saved = app.settings.update(|s| {
+        if let Some(on) = body.run_as_owner {
+            s.commands.run_as_owner = on;
+        }
+        if let Some(on) = body.administrator {
+            s.commands.administrator = on;
+        }
+    });
+    match saved {
+        Ok(settings) => {
+            // เจ้าของเพิ่งเปิดที่หน้าเครื่อง — ขอ UAC ตอนนี้เลย ไม่ต้องรอคำสั่งแรกจากระยะไกล (ซึ่งไม่มีใครกดยืนยันให้)
+            let needs_uac = settings.commands.run_as_owner
+                && settings.commands.administrator
+                && app.display.helper_info().is_some_and(|h| !h.elevated);
+            if needs_uac {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::run_as::elevate(&app).await {
+                        tracing::warn!("ขอสิทธิ์ administrator ไม่สำเร็จ: {}", e.message);
+                    }
+                });
+            }
+            Json(commands_json(&app)).into_response()
+        }
         Err(e) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "save_failed",

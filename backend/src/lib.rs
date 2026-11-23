@@ -32,6 +32,7 @@ pub mod profile;
 pub mod proof;
 pub mod pty;
 pub mod rpc;
+pub mod run_as;
 pub mod screen;
 pub mod settings;
 #[cfg(windows)]

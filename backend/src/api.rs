@@ -4,8 +4,9 @@
 
 use crate::{
     app::App,
-    browse, display, exec, netif, profile, pty,
+    browse, display, netif, profile, pty,
     rpc::{METHOD_NOT_FOUND, NOT_AVAILABLE, Res, RpcError, parse, to_value},
+    run_as,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,10 +29,6 @@ struct RevokeParams {
     session_id: Option<String>,
 }
 
-fn ok() -> Res<Value> {
-    Ok(json!({"ok": true}))
-}
-
 pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<Value> {
     let ws = || {
         ctx.ws
@@ -48,15 +45,10 @@ pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<
         "system.profile" => profile::get(parse(params)?).await,
         "system.network" => to_value(netif::list()),
 
-        "exec.run" => to_value(exec::run(parse(params)?, app.config.mode).await?),
-
-        "pty.open" => {
-            let ws = ws()?;
-            ws.ptys.open(parse(params)?, ws.out.clone(), app.config.mode)
-        }
-        "pty.write" => ws()?.ptys.write(parse(params)?).and_then(|_| ok()),
-        "pty.resize" => ws()?.ptys.resize(parse(params)?).and_then(|_| ok()),
-        "pty.close" => ws()?.ptys.close(parse(params)?).and_then(|_| ok()),
+        // รันด้วยบัญชีไหน (service หรือเจ้าของผ่าน helper) ตัดสินใน run_as.rs
+        "exec.run" => run_as::exec(app, params).await,
+        "pty.open" => run_as::pty_open(app, ws()?, params).await,
+        "pty.write" | "pty.resize" | "pty.close" => run_as::pty_control(app, ws()?, method, params).await,
 
         "file.open_path" => browse::open_path(parse(params)?, &app.config.file_roots).await,
 

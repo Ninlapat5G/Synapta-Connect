@@ -147,13 +147,15 @@ async fn ws_upgrade(
 
 /// เก็บกวาดเมื่อ connection จบ — รวมกรณีที่ถูกตัดกลางคัน (revoke / kill-all) ซึ่ง future ถูกทิ้งโดยไม่รันโค้ดท้ายฟังก์ชัน
 struct WsCleanup {
+    app: App,
     ptys: pty::Registry,
     writer: JoinHandle<()>,
 }
 
 impl Drop for WsCleanup {
     fn drop(&mut self) {
-        self.ptys.close_all();
+        let in_helper = self.ptys.close_all();
+        crate::run_as::close_owner_ptys(&self.app, in_helper);
         self.writer.abort();
     }
 }
@@ -179,6 +181,7 @@ async fn ws_session(app: App, device: String, socket: WebSocket) {
         }
     });
     let cleanup = WsCleanup {
+        app: app.clone(),
         ptys: pty::Registry::default(),
         writer,
     };

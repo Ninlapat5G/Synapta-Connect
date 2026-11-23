@@ -94,6 +94,7 @@ export function Settings({ data, update, disabled, action }) {
   const [draft, setDraft] = useState(null);
   const settings = draft || { source: update.source || '', web_source: update.web_source || '', auto_update: Boolean(update.auto_update) };
   const screen = data.screen_input;
+  const commands = data.commands;
   const helper = data.agent?.mode === 'console'
     ? 'ใช้สำหรับ Windows Service'
     : screen?.helper_connected ? 'Helper เชื่อมต่อแล้ว · ' + (screen.helper_user || 'เจ้าของเครื่อง')
@@ -107,6 +108,7 @@ export function Settings({ data, update, disabled, action }) {
         อนุญาตการจับภาพและส่งอินพุต
       </Toggle>
     </Card>
+    {commands && data.agent?.mode !== 'console' && <CommandAccount commands={commands} disabled={disabled} action={action} />}
     <Card>
       <SectionTitle icon={Settings2}>การตั้งค่าอัปเดต</SectionTitle>
       <form className="grid gap-4" onSubmit={async event => {
@@ -132,6 +134,32 @@ export function Settings({ data, update, disabled, action }) {
       </form>
     </Card>
   </div>;
+}
+
+// คำสั่งจาก agent/Synapta Code/terminal รันด้วยบัญชีไหน — ตัดสินที่ backend/src/run_as.rs
+function CommandAccount({ commands, disabled, action }) {
+  const save = body => action(routes.commands, 'PUT', body);
+  const who = commands.helper_connected
+    ? 'ตอนนี้รันเป็น ' + (commands.helper_user || 'เจ้าของเครื่อง') + (commands.helper_elevated ? ' (administrator)' : ' (ผู้ใช้ทั่วไป)')
+    : 'ยังไม่มีใครล็อกอินที่เครื่อง — ระหว่างนี้คำสั่งรันในบัญชีของ service';
+  const admin = !commands.administrator ? 'ปิดอยู่: ใช้สิทธิ์เท่าที่บัญชีเจ้าของมีตอนล็อกอิน'
+    : commands.helper_elevated ? 'ได้สิทธิ์ administrator แล้ว'
+      : 'รอยืนยัน UAC บนหน้าจอเครื่องนี้ (คำสั่งจะรอจนกว่าจะยืนยัน)';
+
+  return <Card>
+    <SectionTitle icon={Terminal}>การรันคำสั่ง</SectionTitle>
+    <div className="grid gap-3">
+      <Toggle checked={Boolean(commands.run_as_owner)} disabled={disabled}
+        detail={commands.run_as_owner ? who : 'ปิดอยู่: คำสั่งรันในบัญชีของ service ซึ่งเข้าถึงไฟล์ของเจ้าของไม่ได้'}
+        onChange={event => save({ run_as_owner: event.target.checked })}>
+        รันคำสั่งด้วยบัญชีเจ้าของเครื่อง
+      </Toggle>
+      <Toggle checked={Boolean(commands.administrator)} disabled={disabled || !commands.run_as_owner}
+        detail={admin} onChange={event => save({ administrator: event.target.checked })}>
+        ใช้สิทธิ์ระดับ administrator
+      </Toggle>
+    </div>
+  </Card>;
 }
 
 const initialInstall = {

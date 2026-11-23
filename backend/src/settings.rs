@@ -31,11 +31,31 @@ pub struct ScreenInput {
     pub enabled: bool,
 }
 
+/// คำสั่ง (exec / terminal) รันด้วยบัญชีไหน — ตัดสินใน run_as.rs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandSettings {
+    /// เปิด = รันผ่าน helper ด้วยบัญชีเจ้าของเครื่อง (เหมือนพิมพ์ที่หน้าเครื่อง); ไม่มี helper = กลับไปใช้บัญชี service
+    pub run_as_owner: bool,
+    /// เปิด = ต้องได้สิทธิ์ administrator (helper ที่ยังไม่ elevated จะขอ UAC บนหน้าจอเครื่อง)
+    pub administrator: bool,
+}
+
+impl Default for CommandSettings {
+    fn default() -> Self {
+        CommandSettings {
+            run_as_owner: true,
+            administrator: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub update: UpdateSettings,
     pub screen_input: ScreenInput,
+    pub commands: CommandSettings,
     /// บัญชี Windows ของเจ้าของเครื่อง (อ่าน local_token ได้, เป็นเจ้าของ helper)
     pub owner: Option<String>,
     pub network: NetworkSettings,
@@ -142,6 +162,8 @@ mod tests {
         let store = SettingsStore::load(&dir);
         assert!(store.get().update.auto_update);
         assert!(!store.get().screen_input.enabled);
+        assert!(store.get().commands.run_as_owner);
+        assert!(!store.get().commands.administrator);
 
         store.update(|s| s.update.auto_update = false).unwrap();
         assert!(!SettingsStore::load(&dir).get().update.auto_update);

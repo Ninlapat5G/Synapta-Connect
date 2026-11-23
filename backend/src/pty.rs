@@ -2,6 +2,9 @@
 //!
 //! PTY เป็นของ WebSocket connection ที่เปิด: output ส่งกลับเป็น notification
 //! `pty.output` / `pty.exit` และทุก PTY ถูกฆ่าเมื่อ connection ปิดหรือ session ถูก revoke
+//!
+//! PTY มีสองแบบในตารางเดียวกัน: ของโปรเซสนี้ (`Local`) และที่ helper เปิดด้วยบัญชีเจ้าของ (`Owner`, ดู run_as.rs)
+//! ตารางนี้จึงเป็นตัวกันไม่ให้ client สั่งงาน terminal ของ client อื่น ไม่ว่าจะอยู่ที่ไหน
 
 use crate::rpc::{CONFLICT, Res, RpcError, notification};
 use crate::{config::Mode, hex::random_id};
@@ -24,9 +27,15 @@ struct Pty {
     killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
+enum Entry {
+    Local(Pty),
+    /// เปิดอยู่ใน helper — งานกับมันต้องส่งผ่าน helper
+    Owner,
+}
+
 /// PTY ทั้งหมดของ connection เดียว
 #[derive(Clone, Default)]
-pub struct Registry(Arc<Mutex<HashMap<String, Pty>>>);
+pub struct Registry(Arc<Mutex<HashMap<String, Entry>>>);
 
 #[derive(Deserialize)]
 pub struct OpenParams {
@@ -60,9 +69,38 @@ fn not_found(id: &str) -> RpcError {
 }
 
 impl Registry {
-    pub fn open(&self, p: OpenParams, out: Sender<String>, mode: Mode) -> Res<Value> {
+    /// ยังเปิดเพิ่มได้ไหม — ใช้ทั้งที่นี่และก่อนขอให้ helper เปิด (เต็มแล้ว = ไม่ต้องรบกวน helper)
+    pub fn check_room(&self) -> Res<()> {
         if self.0.lock().unwrap().len() >= MAX_PTYS_PER_CONNECTION {
             return Err(RpcError::new(CONFLICT, "เปิด pty ได้ไม่เกิน 8 อันต่อ connection"));
+        }
+        Ok(())
+    }
+
+    /// จด terminal ที่ helper เปิดให้ connection นี้
+    pub fn adopt_owner(&self, id: &str) {
+        self.0.lock().unwrap().insert(id.to_string(), Entry::Owner);
+    }
+
+    /// Some(true) = terminal ของ helper · Some(false) = ของโปรเซสนี้ · None = ไม่ใช่ของ connection นี้
+    pub fn is_owner(&self, id: &str) -> Option<bool> {
+        self.0.lock().unwrap().get(id).map(|e| matches!(e, Entry::Owner))
+    }
+
+    /// terminal ของ helper จบแล้ว
+    pub fn forget(&self, id: &str) {
+        self.0.lock().unwrap().remove(id);
+    }
+
+    pub fn open(&self, p: OpenParams, out: Sender<String>, mode: Mode) -> Res<Value> {
+        self.open_as(random_id(4), p, out, mode)
+    }
+
+    /// เปิดด้วย id ที่ผู้เรียกกำหนด — helper ใช้ id ที่ service จองเส้นทาง output ไว้ก่อนแล้ว (output แรกจะไม่หาย)
+    pub fn open_as(&self, id: String, p: OpenParams, out: Sender<String>, mode: Mode) -> Res<Value> {
+        self.check_room()?;
+        if self.0.lock().unwrap().contains_key(&id) {
+            return Err(RpcError::new(CONFLICT, format!("pty '{id}' เปิดอยู่แล้ว")));
         }
         let size = PtySize {
             rows: p.rows.unwrap_or(30),
@@ -78,13 +116,12 @@ impl Registry {
             mut child,
         } = start(size, &shell, p.cwd.as_deref(), mode)?;
 
-        let id = random_id(4);
         let pty = Pty {
             writer,
             killer: child.clone_killer(),
             master,
         };
-        self.0.lock().unwrap().insert(id.clone(), pty);
+        self.0.lock().unwrap().insert(id.clone(), Entry::Local(pty));
 
         // thread รอโปรเซสจบ → ปล่อย master (บน Windows reader จะไม่ EOF จนกว่า ConPTY จะถูกปิด)
         // แล้วบอก reader ว่า exit code คืออะไร เพื่อให้ pty.exit มาหลัง output ก้อนสุดท้ายเสมอ
@@ -121,14 +158,14 @@ impl Registry {
 
     pub fn write(&self, p: WriteParams) -> Res<()> {
         let mut map = self.0.lock().unwrap();
-        let pty = map.get_mut(&p.pty_id).ok_or_else(|| not_found(&p.pty_id))?;
+        let pty = local(map.get_mut(&p.pty_id), &p.pty_id)?;
         pty.writer.write_all(p.data.as_bytes())?;
         Ok(pty.writer.flush()?)
     }
 
     pub fn resize(&self, p: ResizeParams) -> Res<()> {
-        let map = self.0.lock().unwrap();
-        let pty = map.get(&p.pty_id).ok_or_else(|| not_found(&p.pty_id))?;
+        let mut map = self.0.lock().unwrap();
+        let pty = local(map.get_mut(&p.pty_id), &p.pty_id)?;
         Ok(pty.master.resize(PtySize {
             rows: p.rows,
             cols: p.cols,
@@ -140,14 +177,32 @@ impl Registry {
     /// สั่งฆ่า — thread ที่รออยู่จะเก็บกวาดและส่ง pty.exit เอง
     pub fn close(&self, p: CloseParams) -> Res<()> {
         let mut map = self.0.lock().unwrap();
-        let pty = map.get_mut(&p.pty_id).ok_or_else(|| not_found(&p.pty_id))?;
-        Ok(pty.killer.kill()?)
+        let pty = local(map.get_mut(&p.pty_id), &p.pty_id)?;
+        // กับดัก: WinChildKiller::kill ของ portable-pty กลับผลของ TerminateProcess — ฆ่าสำเร็จกลับได้ Err
+        // (เช่น os error 10035 ที่ค้างจากงานอื่น) จึงไม่เชื่อผลของมัน; ฆ่าไม่สำเร็จจริง pty.exit จะไม่มา ผู้ใช้เห็นเอง
+        let _ = pty.killer.kill();
+        Ok(())
     }
 
-    pub fn close_all(&self) {
-        for pty in self.0.lock().unwrap().values_mut() {
-            let _ = pty.killer.kill();
+    /// ฆ่า terminal ของโปรเซสนี้ทั้งหมด แล้วคืน id ของ terminal ที่อยู่ใน helper ให้ผู้เรียกสั่งปิดต่อ
+    pub fn close_all(&self) -> Vec<String> {
+        let mut owner = Vec::new();
+        for (id, entry) in self.0.lock().unwrap().iter_mut() {
+            match entry {
+                Entry::Local(pty) => {
+                    let _ = pty.killer.kill();
+                }
+                Entry::Owner => owner.push(id.clone()),
+            }
         }
+        owner
+    }
+}
+
+fn local<'a>(entry: Option<&'a mut Entry>, id: &str) -> Res<&'a mut Pty> {
+    match entry {
+        Some(Entry::Local(pty)) => Ok(pty),
+        _ => Err(not_found(id)),
     }
 }
 

@@ -32,6 +32,13 @@ pub struct Output {
     timed_out: bool,
     truncated: bool,
     duration_ms: u128,
+    /// บัญชีที่รันคำสั่งนี้จริง — คำสั่งจากระยะไกลอาจรันด้วยบัญชี service หรือบัญชีเจ้าของ (ดู run_as.rs)
+    run_as: Option<crate::profile::Privilege>,
+}
+
+/// เวลาที่คำสั่งรันได้ (ค่าที่ขอ ตัดไม่ให้เกินเพดาน) — run_as ใช้คิดเวลารอ helper ด้วย
+pub fn time_limit(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS))
 }
 
 /// (โปรแกรม, อาร์กิวเมนต์) ที่จะรันคำสั่งใน shell ที่เลือก
@@ -127,7 +134,7 @@ pub async fn run(p: Params, mode: Mode) -> Res<Output> {
     let out = tokio::spawn(collect(child.stdout.take().unwrap()));
     let err = tokio::spawn(collect(child.stderr.take().unwrap()));
 
-    let limit = Duration::from_millis(p.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS));
+    let limit = time_limit(p.timeout_ms);
     let (exit_code, timed_out) = match tokio::time::timeout(limit, child.wait()).await {
         Ok(status) => {
             tree.release(); // จบเองตามปกติ: ไม่ฆ่าโปรแกรมที่คำสั่งตั้งใจเปิดทิ้งไว้
@@ -158,6 +165,7 @@ pub async fn run(p: Params, mode: Mode) -> Res<Output> {
         timed_out,
         truncated: t1 || t2,
         duration_ms: started.elapsed().as_millis(),
+        run_as: crate::profile::privilege().ok(),
     })
 }
 

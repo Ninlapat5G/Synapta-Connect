@@ -113,6 +113,8 @@ panel **ไม่เปิดเอง** — ผู้ใช้สั่ง `syn
 |---|---|
 | `GET /api/v1/local/screen-input` | `{"enabled", "helper_connected", "helper_user", "helper_session"}` |
 | `PUT /api/v1/local/screen-input` | `{"enabled": bool}` → ปิด = ตัดการจับภาพ/input ทั้งหมดทันที (คำสั่งที่มาจากอุปกรณ์ได้ error `-32004`) |
+| `GET /api/v1/local/commands` | `{"run_as_owner", "administrator", "helper_connected", "helper_user", "helper_elevated"}` (มีใน `status.commands` ด้วย ตั้งแต่ 0.3.14) |
+| `PUT /api/v1/local/commands` | `{"run_as_owner"?: bool, "administrator"?: bool}` → เปิด administrator ขณะ helper ยังไม่ elevated = ขอ UAC บนหน้าจอทันที |
 
 เมื่อใช้ผ่าน RPC แล้วใช้ไม่ได้ในโหมด service: error `-32004` `screen_input_unavailable` พร้อมข้อความไทยบอกสาเหตุ
 (ปิดอยู่ / ไม่มี helper ใน session ที่อนุญาต / helper ตอบช้า) — ผู้ใช้ปลายทางของ API (Synapta Code) ควรแสดงข้อความนี้ตรง ๆ

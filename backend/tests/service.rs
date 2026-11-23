@@ -715,3 +715,178 @@ async fn helper_refuses_to_serve_an_impostor_listener() {
         assert!(inbox.try_recv().is_err(), "helper ต้องไม่ส่ง hello/ผลใด ๆ ให้ผู้ฟังปลอม");
     }
 }
+
+// ---------- คำสั่งรันด้วยบัญชีเจ้าของ (run_as.rs) ----------
+
+/// ctx ของ client WebSocket หนึ่งตัว พร้อมช่องรับ notification (pty.output / pty.exit)
+fn ws_ctx() -> (synapta_connect::api::Ctx, tokio::sync::mpsc::Receiver<String>) {
+    let (out, inbox) = tokio::sync::mpsc::channel(256);
+    let ctx = synapta_connect::api::Ctx {
+        session_id: "client".into(),
+        ws: Some(synapta_connect::api::WsCtx {
+            out,
+            ptys: synapta_connect::pty::Registry::default(),
+        }),
+    };
+    (ctx, inbox)
+}
+
+/// helper ตัวจริง (โค้ดเดียวกับที่รันใน session เจ้าของ) ต่อเข้า service ที่ทดสอบ
+fn real_helper(s: &Svc) -> tokio::task::JoinHandle<()> {
+    let port: u16 = s.base.rsplit(':').next().unwrap().parse().unwrap();
+    let token = s.file_token();
+    tokio::spawn(async move {
+        let _ = synapta_connect::helper::session(port, token.trim()).await;
+    })
+}
+
+/// เก็บ output ของ terminal จนเจอ `needle` หรือหมดเวลา
+async fn read_pty_until(inbox: &mut tokio::sync::mpsc::Receiver<String>, id: &str, needle: &str) -> String {
+    use base64::Engine;
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !seen.contains(needle) {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(text)) = tokio::time::timeout(left, inbox.recv()).await else {
+            panic!("ไม่เห็น {needle:?} ใน output ของ terminal: {seen:?}");
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        if v["method"] == "pty.output" && v["params"]["pty_id"] == id {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(v["params"]["data_b64"].as_str().unwrap())
+                .unwrap();
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn commands_run_through_the_owner_helper_end_to_end() {
+    use synapta_connect::api::dispatch;
+    let s = start(Mode::Service).await;
+    let helper = real_helper(&s);
+    wait_helper(&s, true).await;
+    let (ctx, mut inbox) = ws_ctx();
+
+    // exec: helper รันจริงแล้วส่งผลกลับ พร้อมบอกบัญชีที่รัน
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let result = dispatch(
+        &s.app,
+        &ctx,
+        "exec.run",
+        json!({"command": "echo owner-exec", "shell": shell}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["exit_code"], 0, "{result}");
+    assert!(result["stdout"].as_str().unwrap().contains("owner-exec"), "{result}");
+    assert!(result["run_as"]["user"].is_string(), "{result}");
+
+    // terminal: เปิดใน helper, output แรกต้องถึง client (เส้นทางจองไว้ก่อน), เขียน/ปิดผ่าน helper ได้
+    let opened = dispatch(&s.app, &ctx, "pty.open", json!({"shell": shell}))
+        .await
+        .unwrap();
+    let id = opened["pty_id"].as_str().unwrap().to_string();
+    let ptys = &ctx.ws.as_ref().unwrap().ptys;
+    assert_eq!(ptys.is_owner(&id), Some(true));
+    // ConPTY ถามตำแหน่ง cursor (ESC[6n) แล้วรอคำตอบก่อนเริ่ม shell — ตอบแทน terminal จริง
+    if cfg!(windows) {
+        dispatch(&s.app, &ctx, "pty.write", json!({"pty_id": id, "data": "\u{1b}[1;1R"}))
+            .await
+            .unwrap();
+    }
+    dispatch(
+        &s.app,
+        &ctx,
+        "pty.write",
+        json!({"pty_id": id, "data": "echo pty-owner-ok\r\n"}),
+    )
+    .await
+    .unwrap();
+    read_pty_until(&mut inbox, &id, "pty-owner-ok").await;
+    dispatch(&s.app, &ctx, "pty.close", json!({"pty_id": id}))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while ptys.is_owner(&id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pty.exit ต้องมาถึงและลบ terminal ออกจากตาราง"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // client อื่นสั่งงาน terminal ที่ไม่ใช่ของตัวเองไม่ได้
+    let reopened = dispatch(&s.app, &ctx, "pty.open", json!({"shell": shell}))
+        .await
+        .unwrap();
+    let (other, _) = ws_ctx();
+    let stolen = dispatch(
+        &s.app,
+        &other,
+        "pty.write",
+        json!({"pty_id": reopened["pty_id"], "data": "x"}),
+    )
+    .await;
+    assert!(stolen.is_err(), "terminal ของคนอื่นต้องเขียนไม่ได้");
+
+    // helper หลุด → terminal ที่ค้างอยู่ได้ pty.exit
+    helper.abort();
+    wait_helper(&s, false).await;
+    assert_eq!(
+        ctx.ws
+            .as_ref()
+            .unwrap()
+            .ptys
+            .is_owner(reopened["pty_id"].as_str().unwrap()),
+        None
+    );
+}
+
+#[tokio::test]
+async fn command_account_follows_the_owner_settings() {
+    use synapta_connect::api::dispatch;
+    let s = start(Mode::Service).await;
+    let (ctx, _inbox) = ws_ctx();
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let exec = |ctx| dispatch(&s.app, ctx, "exec.run", json!({"command": "echo here", "shell": shell}));
+
+    // ไม่มี helper → รันในโปรเซส service ได้ตามเดิม
+    assert_eq!(exec(&ctx).await.unwrap()["exit_code"], 0);
+
+    // ต้องการ administrator แต่ไม่มี helper → ปฏิเสธพร้อมเหตุผล ไม่แอบรันด้วยบัญชี service
+    let token = s.panel_token().await;
+    let state: Value = s
+        .req(reqwest::Method::PUT, "/api/v1/local/commands", Some(&token))
+        .json(&json!({"administrator": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (state["run_as_owner"].as_bool(), state["administrator"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let refused = exec(&ctx).await.unwrap_err();
+    assert!(refused.message.contains("administrator"), "{}", refused.message);
+
+    // helper ที่ไม่ใช่ administrator → service ขอให้ helper ยกสิทธิ์ (UAC) ก่อนรัน
+    let helper = connect_helper(&s, &s.file_token(), "owner").await.unwrap();
+    wait_helper(&s, true).await;
+    let pending = exec(&ctx).await.unwrap_err(); // helper ปลอมตอบ elevate ได้ แต่ไม่มีตัว administrator ต่อเข้ามา
+    assert!(pending.message.contains("administrator"), "{}", pending.message);
+
+    // เจ้าของปิดการรันด้วยบัญชีเจ้าของ → กลับไปรันในโปรเซส service แม้มี helper
+    s.app
+        .settings
+        .update(|st| {
+            st.commands.run_as_owner = false;
+            st.commands.administrator = false;
+        })
+        .unwrap();
+    assert_eq!(exec(&ctx).await.unwrap()["exit_code"], 0);
+    helper.abort();
+}

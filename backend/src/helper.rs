@@ -3,12 +3,14 @@
 //! ทำงานด้วยสิทธิ์ของผู้ใช้ที่ล็อกอิน (เริ่มจาก HKLM\...\Run ตอนล็อกอิน) ต่อเข้า service ที่ loopback ด้วย local_token
 //! ผู้ใช้ที่ไม่ใช่เจ้าของอ่านไฟล์ token ไม่ได้ → helper ของเขาเลิกทำงานเงียบ ๆ จึงไม่มีทางเป็นตาของ service ได้
 //! ตัวตนของ helper = สิทธิ์อ่านไฟล์ token (ACL) ไม่ใช่สิ่งที่ helper อ้างเอง; รับเฉพาะ method จับภาพ/input (display.rs)
+//! และคำสั่งที่รันด้วยบัญชีเจ้าของ (run_as.rs)
 
 use crate::{
-    config::{Ports, panel_port, service_data_dir},
+    config::{Mode, Ports, panel_port, service_data_dir},
     display::{self, HelperInfo},
-    proof,
-    rpc::RpcError,
+    exec, proof, pty,
+    rpc::{Res, RpcError, parse, to_value},
+    run_as,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -98,6 +100,7 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_default(),
         session: session_id(),
+        elevated: is_elevated::is_elevated(),
     };
     sink.send(Message::Text(json!({"hello": me}).to_string().into()))
         .await?;
@@ -105,13 +108,19 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
     let _online = Online::mark();
 
     // งานแต่ละตัวทำแยกกัน (จับภาพช้าต้องไม่ขวางการคลิก) ผลกลับผ่านคิวเดียวไปยังตัวเขียน socket
+    // output ของ terminal ก็ออกทางคิวนี้ (notification ไม่มี id)
     let (out, mut replies) = mpsc::channel::<String>(16);
+    // terminal ที่เปิดให้ service ตายไปพร้อม connection นี้ → ปิดทั้งหมดเมื่อ session จบ
+    let ptys = PtyCleanup(pty::Registry::default());
     loop {
         tokio::select! {
             msg = stream.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
-                    let out = out.clone();
-                    tokio::spawn(async move { let _ = out.send(handle(&text).await).await; });
+                    let (out, ptys) = (out.clone(), ptys.0.clone());
+                    tokio::spawn(async move {
+                        let reply = handle(&text, &ptys, &out).await;
+                        let _ = out.send(reply).await;
+                    });
                 }
                 Some(Ok(Message::Ping(p))) => sink.send(Message::Pong(p)).await?,
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Ok(()),
@@ -141,12 +150,23 @@ impl Drop for Online {
     }
 }
 
-async fn handle(text: &str) -> String {
+struct PtyCleanup(pty::Registry);
+
+impl Drop for PtyCleanup {
+    fn drop(&mut self) {
+        self.0.close_all();
+    }
+}
+
+async fn handle(text: &str, ptys: &pty::Registry, out: &mpsc::Sender<String>) -> String {
     let v: Value = serde_json::from_str(text).unwrap_or_default();
     let id = v["id"].clone();
     let method = v["method"].as_str().unwrap_or_default();
+    let params = v["params"].clone();
     let result = if display::is_display_method(method) {
-        display::execute(method, v["params"].clone()).await
+        display::execute(method, params).await
+    } else if run_as::is_command_method(method) {
+        command(method, params, ptys, out).await
     } else {
         Err(RpcError::new(
             crate::rpc::METHOD_NOT_FOUND,
@@ -158,6 +178,91 @@ async fn handle(text: &str) -> String {
         Err(e) => json!({"id": id, "error": e}),
     }
     .to_string()
+}
+
+/// คำสั่งที่ service ส่งมาให้รันด้วยบัญชีเจ้าของ — Mode::Console = PATH ของผู้ใช้นี้ (รวมที่เพิ่งติดตั้งหลังล็อกอิน)
+async fn command(method: &str, params: Value, ptys: &pty::Registry, out: &mpsc::Sender<String>) -> Res<Value> {
+    let ok = || Ok(json!({"ok": true}));
+    match method {
+        "exec.run" => to_value(exec::run(parse(params)?, Mode::Console).await?),
+        "pty.open" => {
+            // id มาจาก service ที่จองเส้นทาง output ไว้แล้ว — รับเฉพาะรูปแบบที่ service สร้าง
+            let id = params["pty_id"].as_str().unwrap_or_default().to_string();
+            if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(RpcError::invalid("pty_id ไม่ถูกต้อง"));
+            }
+            ptys.open_as(id, parse(params["open"].clone())?, out.clone(), Mode::Console)
+        }
+        "pty.write" => ptys.write(parse(params)?).and_then(|_| ok()),
+        "pty.resize" => ptys.resize(parse(params)?).and_then(|_| ok()),
+        "pty.close" => ptys.close(parse(params)?).and_then(|_| ok()),
+        "helper.elevate" => elevate(),
+        other => Err(RpcError::new(
+            crate::rpc::METHOD_NOT_FOUND,
+            format!("helper ไม่รับ method '{other}'"),
+        )),
+    }
+}
+
+/// เริ่ม helper ตัวใหม่ด้วยสิทธิ์ administrator (UAC) แล้วตัวนี้ออก — ตัวใหม่รอ mutex ของ session จนตัวนี้ออก
+#[cfg(windows)]
+fn elevate() -> Res<Value> {
+    if is_elevated::is_elevated() {
+        return Ok(json!({"elevated": true}));
+    }
+    run_elevated_helper()?;
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(500)); // ให้คำตอบถึง service ก่อน
+        crate::tray::stop();
+        std::process::exit(0);
+    });
+    Ok(json!({"elevated": true}))
+}
+
+#[cfg(not(windows))]
+fn elevate() -> Res<Value> {
+    Err(RpcError::new(
+        crate::rpc::NOT_AVAILABLE,
+        "ขอสิทธิ์ administrator ได้เฉพาะบน Windows",
+    ))
+}
+
+/// เปิดหน้าต่าง UAC แล้วรอจนเจ้าของตอบ (ShellExecuteEx "runas")
+#[cfg(windows)]
+fn run_elevated_helper() -> Res<()> {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_CANCELLED,
+            UI::{
+                Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW},
+                WindowsAndMessaging::SW_HIDE,
+            },
+        },
+        core::{HSTRING, PCWSTR, w},
+    };
+    let exe = std::env::current_exe()?;
+    let file = HSTRING::from(exe.as_os_str());
+    let args = HSTRING::from(format!("helper {HANDOFF_ARG}"));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(args.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    match unsafe { ShellExecuteExW(&mut info) } {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => Err(RpcError::new(
+            crate::rpc::INTERNAL,
+            "เจ้าของเครื่องไม่ได้กดยืนยัน UAC — คำสั่งยังไม่ได้สิทธิ์ administrator",
+        )),
+        Err(e) => Err(RpcError::new(
+            crate::rpc::INTERNAL,
+            format!("ขอสิทธิ์ administrator ไม่ได้: {e}"),
+        )),
+    }
 }
 
 /// helper ได้ทีละตัวต่อ session — service ปฏิเสธตัวที่สอง ซึ่งจะวนต่อใหม่ไปเรื่อย ๆ จึงเลิกตั้งแต่ต้น
@@ -201,8 +306,11 @@ fn claim_mutex(name: windows::core::PCWSTR, wait: Duration) -> Option<windows::W
 /// ตัวแปรที่ helper รุ่นเก่าใส่ให้ตัวที่รับช่วง — ตัวที่รับช่วงแล้วไม่ส่งต่ออีก จึงไม่มีทางวนสร้างโปรเซสไม่รู้จบ
 const HANDOFF_ENV: &str = "SYNAPTA_HELPER_HANDOFF";
 
+/// แบบอาร์กิวเมนต์ — ตัวที่เริ่มผ่าน UAC ไม่ได้สืบทอด environment ของผู้เรียก
+const HANDOFF_ARG: &str = "--handoff";
+
 fn handed_off() -> bool {
-    std::env::var_os(HANDOFF_ENV).is_some()
+    std::env::var_os(HANDOFF_ENV).is_some() || std::env::args().any(|a| a == HANDOFF_ARG)
 }
 
 /// helper อยู่ยาวตลอดการล็อกอิน แต่ตัวอัปเดตสลับไฟล์ใต้มันได้ — ตัวเก่าจะรันโค้ดเก่าต่อไปจนล็อกเอาต์
