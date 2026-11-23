@@ -60,6 +60,16 @@ async fn target(app: &App) -> Res<Target> {
         }
         return Ok(Target::Here);
     };
+    if helper.version.is_empty() {
+        // helper รุ่นเก่าที่ค้างอยู่จากก่อนอัปเดต รันคำสั่งให้ไม่ได้ — ใช้บัญชี service ไปก่อนจนกว่ามันจะถูกแทน
+        if settings.administrator {
+            return Err(RpcError::new(
+                INTERNAL,
+                "helper บนเครื่องปลายทางยังเป็นรุ่นเก่า รันคำสั่งระดับ administrator ไม่ได้ — ล็อกเอาต์แล้วล็อกอินใหม่ที่เครื่องหนึ่งครั้ง",
+            ));
+        }
+        return Ok(Target::Here);
+    }
     if settings.administrator && !helper.elevated {
         elevate(app).await?;
     }

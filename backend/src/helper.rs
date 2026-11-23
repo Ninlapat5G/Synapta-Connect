@@ -27,6 +27,12 @@ pub async fn run() -> anyhow::Result<()> {
     if !claim_session(handed_off()) {
         return Ok(()); // มี helper ใน session นี้อยู่แล้ว
     }
+    // terminal ที่รันด้วยบัญชีเจ้าของบน Windows ที่ไม่มี ConPTY (Server 2016) ต้องแตก WinPTY ลงที่ที่บัญชีนี้เขียนได้
+    // และผู้ใช้อื่นเขียนไม่ได้ — โฟลเดอร์ของ service เขียนไม่ได้ จึงใช้ LOCALAPPDATA ของเจ้าของ
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        crate::legacy_pty::set_data_dir(&std::path::Path::new(&local).join("SynaptaConnect").join("helper"));
+    }
     let data_dir = service_data_dir();
     let token_file = data_dir.join("local_token");
     // อ่าน token ได้ = เป็นเจ้าของ จึงสร้างไอคอนเปิด panel และไอคอนมุมจอให้ (ทำเบื้องหลัง ไม่ให้ช้า helper)
@@ -45,10 +51,10 @@ async fn serve(data_dir: &std::path::Path, token_file: &std::path::Path) -> anyh
     let mut wait = RETRY_MIN;
     loop {
         #[cfg(windows)]
-        if newer_version_installed() {
+        if let Some(installed) = newer_version_installed() {
             // เอาไอคอนมุมจอออกก่อน ตัวใหม่จะใส่ของตัวเอง — ไม่ให้มีสองไอคอนซ้อนกัน
             crate::tray::stop();
-            start_in_this_session_as(true);
+            start_in_this_session_as(Some(&installed));
             return Ok(());
         }
         // อ่านใหม่ทุกรอบ: service สุ่ม token ใหม่ทุกครั้งที่เริ่ม
@@ -101,6 +107,7 @@ pub async fn session(port: u16, token: &str) -> anyhow::Result<()> {
             .unwrap_or_default(),
         session: session_id(),
         elevated: is_elevated::is_elevated(),
+        version: env!("CARGO_PKG_VERSION").into(),
     };
     sink.send(Message::Text(json!({"hello": me}).to_string().into()))
         .await?;
@@ -303,7 +310,7 @@ fn claim_mutex(name: windows::core::PCWSTR, wait: Duration) -> Option<windows::W
     }
 }
 
-/// ตัวแปรที่ helper รุ่นเก่าใส่ให้ตัวที่รับช่วง — ตัวที่รับช่วงแล้วไม่ส่งต่ออีก จึงไม่มีทางวนสร้างโปรเซสไม่รู้จบ
+/// ตัวแปรที่ helper รุ่นเก่าใส่ให้ตัวที่รับช่วง: ค่า = รุ่นใน install.json ที่ตัวเก่าตั้งใจเริ่ม (ดู newer_version_installed)
 const HANDOFF_ENV: &str = "SYNAPTA_HELPER_HANDOFF";
 
 /// แบบอาร์กิวเมนต์ — ตัวที่เริ่มผ่าน UAC ไม่ได้สืบทอด environment ของผู้เรียก
@@ -314,15 +321,21 @@ fn handed_off() -> bool {
 }
 
 /// helper อยู่ยาวตลอดการล็อกอิน แต่ตัวอัปเดตสลับไฟล์ใต้มันได้ — ตัวเก่าจะรันโค้ดเก่าต่อไปจนล็อกเอาต์
-/// (input/จับภาพ/ไอคอนไม่ได้ของที่แก้ในรุ่นใหม่) จึงต้องเปลี่ยนตัวเองเป็นรุ่นที่ติดตั้งอยู่
+/// (input/จับภาพ/ไอคอนไม่ได้ของที่แก้ในรุ่นใหม่) จึงต้องเปลี่ยนตัวเองเป็นรุ่นที่ติดตั้งอยู่ — คืนรุ่นที่จะเริ่ม
+///
+/// บั๊กจริง (0.3.11–0.3.14): เดิมตัวที่รับช่วง "ไม่ส่งต่ออีกเลย" เพื่อกันวนไม่รู้จบ ผลคือหลังอัปเดตครั้งที่สองขึ้นไป
+/// helper ค้างเป็นรุ่นเก่าจนล็อกเอาต์ (0.3.14 บน app01: helper 0.3.13 ปฏิเสธ exec.run ทุกคำสั่ง)
+/// ตอนนี้กันวนด้วยรุ่น: ไม่ส่งต่อเฉพาะเมื่อตัวเก่าเพิ่งเริ่มรุ่นนี้มาแล้วได้ตัวเรา (exe ไม่ตรงกับ install.json)
+/// การอัปเดตรอบถัดไปเปลี่ยนรุ่นใน install.json จึงส่งต่อได้เสมอ
 #[cfg(windows)]
-fn newer_version_installed() -> bool {
+fn newer_version_installed() -> Option<String> {
     let dir = crate::winsvc::install::install_dir();
-    let installed_here = std::env::current_exe().is_ok_and(|exe| exe.starts_with(&dir));
-    installed_here
-        && !handed_off()
-        && crate::update::installer::installed_version_from(&dir.join("install.json"))
-            .is_some_and(|version| version != env!("CARGO_PKG_VERSION"))
+    if !std::env::current_exe().is_ok_and(|exe| exe.starts_with(&dir)) {
+        return None;
+    }
+    let installed = crate::update::installer::installed_version_from(&dir.join("install.json"))?;
+    let already_tried = std::env::var(HANDOFF_ENV).is_ok_and(|tried| tried == installed);
+    (installed != env!("CARGO_PKG_VERSION") && !already_tried).then_some(installed)
 }
 
 /// เริ่ม helper ของ service ใน session นี้ (ตัวที่ติดตั้งไว้ใน Program Files) — มีอยู่แล้วตัวใหม่จะเลิกเอง
@@ -331,11 +344,12 @@ fn newer_version_installed() -> bool {
 /// `panel` ซึ่งรันด้วยบัญชีเจ้าของใน session นั้นอยู่แล้วจึงเรียกตัวนี้แทน
 #[cfg(windows)]
 pub fn start_in_this_session() {
-    start_in_this_session_as(false);
+    start_in_this_session_as(None);
 }
 
 #[cfg(windows)]
-fn start_in_this_session_as(handoff: bool) {
+/// `handoff` = รุ่นที่ตัวเก่าคาดว่าจะได้ (ตัวใหม่รอ mutex ให้ตัวเก่าออกก่อน)
+fn start_in_this_session_as(handoff: Option<&str>) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -346,11 +360,10 @@ fn start_in_this_session_as(handoff: bool) {
     // กับดัก: stdio ต้องเป็น null — ถ้าสืบทอด pipe ของผู้เรียก (เช่นตัวติดตั้งที่อ่าน output ของ `panel` จนจบ)
     // helper ที่อยู่ยาวจะถือ pipe ไว้ ทำให้ผู้เรียกรอไม่มีวันจบ
     let mut command = std::process::Command::new(exe);
-    if handoff {
-        command.env(HANDOFF_ENV, "1");
-    } else {
-        command.env_remove(HANDOFF_ENV);
-    }
+    match handoff {
+        Some(version) => command.env(HANDOFF_ENV, version),
+        None => command.env_remove(HANDOFF_ENV),
+    };
     let _ = command
         .arg("helper")
         .stdin(std::process::Stdio::null())

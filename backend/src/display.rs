@@ -63,6 +63,9 @@ pub struct HelperInfo {
     /// token ของ helper มีสิทธิ์ administrator เต็ม (helper ก่อน 0.3.14 ไม่ส่ง = false)
     #[serde(default)]
     pub elevated: bool,
+    /// รุ่นของ helper — ว่าง = ก่อน 0.3.15 (helper 0.3.13 ลงไปรันคำสั่งให้ไม่ได้)
+    #[serde(default)]
+    pub version: String,
 }
 
 struct Job {

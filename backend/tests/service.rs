@@ -485,6 +485,16 @@ async fn helper_handshake(
 
 /// `secret` = ความลับที่ helper อ้างว่ารู้ (ของจริงคือ local_token จากไฟล์)
 async fn connect_helper(s: &Svc, secret: &str, user: &str) -> Result<tokio::task::JoinHandle<()>, String> {
+    connect_helper_version(s, secret, user, Some("9.9.9")).await
+}
+
+/// `version: None` = helper ก่อน 0.3.15 ที่ไม่ส่งรุ่นมา (ยังค้างอยู่ได้หลังอัปเดต)
+async fn connect_helper_version(
+    s: &Svc,
+    secret: &str,
+    user: &str,
+    version: Option<&str>,
+) -> Result<tokio::task::JoinHandle<()>, String> {
     let nonce = random_id(16);
     let (socket, response) = helper_handshake(s, &nonce, &proof::make(secret, proof::HELPER, &nonce)).await?;
     let server_proof = response.headers()["x-synapta-server-proof"].to_str().unwrap();
@@ -493,11 +503,12 @@ async fn connect_helper(s: &Svc, secret: &str, user: &str) -> Result<tokio::task
         "agent ต้องพิสูจน์ตัวกลับ"
     );
     let (mut sink, mut stream) = socket.split();
-    sink.send(Message::Text(
-        json!({"hello": {"user": user, "session": 7}}).to_string().into(),
-    ))
-    .await
-    .unwrap();
+    // helper รุ่นเก่าไม่มีฟิลด์ version เลย (ไม่ใช่ null)
+    let mut hello = json!({"hello": {"user": user, "session": 7}});
+    if let Some(version) = version {
+        hello["hello"]["version"] = json!(version);
+    }
+    sink.send(Message::Text(hello.to_string().into())).await.unwrap();
     Ok(tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             if let Message::Text(text) = msg {
@@ -854,6 +865,16 @@ async fn command_account_follows_the_owner_settings() {
 
     // ไม่มี helper → รันในโปรเซส service ได้ตามเดิม
     assert_eq!(exec(&ctx).await.unwrap()["exit_code"], 0);
+
+    // helper รุ่นเก่าที่ค้างจากก่อนอัปเดต (ไม่รู้จัก exec.run) → ไม่ส่งไปให้มัน รันในโปรเซส service แทน
+    let old = connect_helper_version(&s, &s.file_token(), "owner", None)
+        .await
+        .unwrap();
+    wait_helper(&s, true).await;
+    let here = exec(&ctx).await.unwrap();
+    assert!(here["stdout"].as_str().unwrap().contains("here"), "{here}");
+    old.abort();
+    wait_helper(&s, false).await;
 
     // ต้องการ administrator แต่ไม่มี helper → ปฏิเสธพร้อมเหตุผล ไม่แอบรันด้วยบัญชี service
     let token = s.panel_token().await;
