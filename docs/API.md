@@ -106,7 +106,7 @@ client_confirm = HMAC-SHA256(key=K, "synapta-connect client" ‖ host_pubkey ‖
 | -32001 | เรียกผิดช่องทาง (เช่น `pty.*` ผ่าน HTTP) |
 | -32002 | สถานะไม่ตรง (offset ผิด, checksum ไม่ตรง, ไม่มี pty/transfer นั้น) |
 | -32003 | ทรัพยากรเต็ม (stream พร้อมกันครบ 3 อัน) |
-| -32004 | (โหมด service) จับภาพ/ส่ง input ไม่ได้: เจ้าของยังไม่อนุญาต / ไม่มี helper / helper ตอบช้า — ข้อความไทยบอกสาเหตุ |
+| -32004 | จับภาพหรือส่ง input ไม่ได้ พร้อมข้อความระบุสถานะของ helper หรือสาเหตุที่ Windows รับ input ไม่ได้ |
 
 HTTP นอก JSON-RPC (`/transfers`, `/files`, `/screen/stream`) ตอบ `{"error":{"code","message"}}` พร้อม status 400/409/429/500 ตาม code ข้างบน
 route ที่ต้องมีใบรับรองแต่ไม่มี → `401 client_certificate_required`
@@ -155,6 +155,10 @@ route ที่ต้องมีใบรับรองแต่ไม่ม�
 
 result: `{"stdout","stderr","exit_code","timed_out","truncated","duration_ms"}` · **timeout ฆ่าทั้งต้นไม้โปรเซส** (Windows: Job Object, Unix: process group — ยังไม่ได้ทดสอบบน Unix) แต่คำสั่งที่จบเองและตั้งใจเปิดโปรแกรมทิ้งไว้เบื้องหลังจะไม่ถูกฆ่า · `exit_code` เป็น `null` เมื่อโดนฆ่าเพราะ timeout ·
 stdout/stderr เก็บ 1 MiB แรกต่อ stream · ภาษาไทย/UTF-8 ผ่านได้ถูกต้อง
+
+บน Windows คำสั่งและ Terminal ใช้ CMD กับ Windows PowerShell จาก System32 โดยตรง เซสชันที่เปิดผ่าน Windows Service อ่าน `PATH`
+ระดับเครื่องล่าสุดทุกครั้งที่เปิด ในโหมด console จะคงลำดับค้นหาของโปรเซสเดิมและเพิ่มรายการล่าสุดของเครื่องและผู้ใช้ ส่วน `exec.run`
+สามารถระบุ `env.Path` เพื่อใช้ค่าเฉพาะคำสั่งได้
 
 #### Terminal โต้ตอบ (PTY) — **เฉพาะ WebSocket**
 | method | params | result |
@@ -248,8 +252,10 @@ result: `{"format","mime","width","height","origin_x","origin_y","scale","data_b
 | `input.type` | `{"text"}` (รองรับ Unicode/ไทย) |
 | `input.key` | `{"key", "modifiers"?: ["ctrl","alt","shift","meta"]}` — `key` = `enter tab escape backspace delete space up down left right home end pageup pagedown f1…f12` หรืออักขระตัวเดียว |
 
-result ทุกตัว `{"ok": true}` · คำสั่ง input ทำทีละคำสั่งทั้งเครื่อง · ถ้าหน้าต่างที่โฟกัสรันด้วยสิทธิ์ admin แต่ agent เป็น standard user
-Windows จะไม่ยอมรับ input (UIPI) · **ในโหมด Windows Service** (Session 0) การจับภาพ/ส่ง input ทำผ่าน helper ในเซสชันของเจ้าของเครื่องที่อนุญาตไว้เท่านั้น — ใช้ไม่ได้ตอบ error `-32004` พร้อมสาเหตุ (ดู `docs/SERVICE_AND_UPDATE.md` §4); MJPEG stream ไม่รองรับในโหมดนี้
+ผลสำเร็จ `{"ok": true}` บน Windows หมายถึงระบบรับ event เข้าคิว ให้ตรวจผลที่หน้าจอเมื่อต้องยืนยันว่าแอปปลายทางตอบสนอง
+คำสั่ง input ทำทีละคำสั่ง และจะตอบ error `-32004` เมื่อเซสชันหรือ desktop รับ input ไม่ได้ หรือ Windows รับ event ไม่ครบ (อาจเกิดจาก UIPI)
+**ในโหมด Windows Service** (Session 0) การจับภาพและส่ง input ทำผ่าน helper ในเซสชันของเจ้าของเครื่องที่อนุญาตไว้เท่านั้น
+หากใช้ helper ไม่ได้ จะได้ error `-32004` พร้อมสาเหตุ (ดู `docs/SERVICE_AND_UPDATE.md` §4) โหมดนี้ไม่รองรับ MJPEG stream
 
 #### อุปกรณ์ที่จับคู่ (ใช้ชื่อ `session` ตามเดิม)
 | method | params | result |

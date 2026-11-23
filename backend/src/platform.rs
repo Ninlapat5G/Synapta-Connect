@@ -2,7 +2,11 @@
 
 #[cfg(windows)]
 pub mod win {
-    use std::ffi::c_void;
+    use std::{
+        collections::HashSet,
+        ffi::{OsString, c_void},
+        os::windows::ffi::OsStringExt,
+    };
 
     unsafe extern "system" {
         fn SetConsoleOutputCP(code_page: u32) -> i32;
@@ -16,7 +20,24 @@ pub mod win {
         fn MessageBoxW(window: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
     }
 
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            key: isize,
+            subkey: *const u16,
+            value: *const u16,
+            flags: u32,
+            value_type: *mut u32,
+            data: *mut c_void,
+            bytes: *mut u32,
+        ) -> i32;
+    }
+
     const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+    const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+    const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
+    const RRF_RT_REG_SZ: u32 = 0x0002;
+    const RRF_RT_REG_EXPAND_SZ: u32 = 0x0004;
 
     /// กล่องข้อความแจ้งผิดพลาด — ฟอนต์ระบบแสดงภาษาไทยได้ ต่างจาก console ของ Server 2016 ที่ขึ้นเป็นกล่องสี่เหลี่ยม
     pub fn message_box(title: &str, text: &str) {
@@ -78,6 +99,62 @@ pub mod win {
     pub fn system_tool(name: &str) -> std::path::PathBuf {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
         std::path::Path::new(&root).join("System32").join(name)
+    }
+
+    pub fn terminal_program(shell: &str) -> OsString {
+        match shell.to_ascii_lowercase().as_str() {
+            "cmd" | "cmd.exe" => system_tool("cmd.exe").into(),
+            "powershell" | "powershell.exe" => system_tool(r"WindowsPowerShell\v1.0\powershell.exe").into(),
+            _ => shell.into(),
+        }
+    }
+
+    pub fn terminal_path(mode: crate::config::Mode) -> Option<OsString> {
+        let machine = registry_path(
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        );
+        if mode == crate::config::Mode::Service {
+            return machine;
+        }
+
+        // Keep the launching shell's PATH precedence (for example, an activated virtual environment).
+        let paths = [
+            std::env::var_os("Path"),
+            machine,
+            registry_path(HKEY_CURRENT_USER, "Environment"),
+        ];
+        let mut seen = HashSet::new();
+        std::env::join_paths(
+            paths
+                .iter()
+                .flatten()
+                .flat_map(std::env::split_paths)
+                .filter(|path| seen.insert(path.as_os_str().to_ascii_lowercase())),
+        )
+        .ok()
+    }
+
+    fn registry_path(key: isize, subkey: &str) -> Option<OsString> {
+        // Windows limits an environment variable to 32,767 characters.
+        let mut path = vec![0u16; 32_768];
+        let mut bytes = (path.len() * size_of::<u16>()) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                key,
+                wide(subkey).as_ptr(),
+                wide("Path").as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                path.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        let end = path.iter().position(|&unit| unit == 0)?;
+        Some(OsString::from_wide(&path[..end]))
     }
 
     /// บัญชีที่โปรเซสนี้รันอยู่ในรูป `DOMAIN\user` (service บัญชีเสมือนได้ `nt service\synaptaconnect`)

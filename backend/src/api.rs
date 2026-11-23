@@ -48,11 +48,11 @@ pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<
         "system.profile" => profile::get(parse(params)?).await,
         "system.network" => to_value(netif::list()),
 
-        "exec.run" => to_value(exec::run(parse(params)?).await?),
+        "exec.run" => to_value(exec::run(parse(params)?, app.config.mode).await?),
 
         "pty.open" => {
             let ws = ws()?;
-            ws.ptys.open(parse(params)?, ws.out.clone())
+            ws.ptys.open(parse(params)?, ws.out.clone(), app.config.mode)
         }
         "pty.write" => ws()?.ptys.write(parse(params)?).and_then(|_| ok()),
         "pty.resize" => ws()?.ptys.resize(parse(params)?).and_then(|_| ok()),
@@ -66,7 +66,17 @@ pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<
             app.transfers.rpc(method, params).await
         }
 
-        m if display::is_display_method(m) => app.display.call(app, m, params).await,
+        m if display::is_display_method(m) => {
+            let result = app.display.call(app, m, params).await;
+            if m.starts_with("input.")
+                && m != "input.mouse_move"
+                && let Err(error) = &result
+                && error.code == display::SCREEN_INPUT_UNAVAILABLE
+            {
+                tracing::warn!(session = %ctx.session_id, method = m, reason = %error.message, "input unavailable");
+            }
+            result
+        }
 
         "session.list" => Ok(json!({"current": ctx.session_id, "sessions": app.auth.list()})),
         "session.revoke" => {

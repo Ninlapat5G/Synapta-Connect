@@ -3,8 +3,8 @@
 //! PTY เป็นของ WebSocket connection ที่เปิด: output ส่งกลับเป็น notification
 //! `pty.output` / `pty.exit` และทุก PTY ถูกฆ่าเมื่อ connection ปิดหรือ session ถูก revoke
 
-use crate::hex::random_id;
 use crate::rpc::{CONFLICT, Res, RpcError, notification};
+use crate::{config::Mode, hex::random_id};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Deserialize;
@@ -60,7 +60,7 @@ fn not_found(id: &str) -> RpcError {
 }
 
 impl Registry {
-    pub fn open(&self, p: OpenParams, out: Sender<String>) -> Res<Value> {
+    pub fn open(&self, p: OpenParams, out: Sender<String>, mode: Mode) -> Res<Value> {
         if self.0.lock().unwrap().len() >= MAX_PTYS_PER_CONNECTION {
             return Err(RpcError::new(CONFLICT, "เปิด pty ได้ไม่เกิน 8 อันต่อ connection"));
         }
@@ -76,7 +76,7 @@ impl Registry {
             mut reader,
             writer,
             mut child,
-        } = start(size, &shell, p.cwd.as_deref())?;
+        } = start(size, &shell, p.cwd.as_deref(), mode)?;
 
         let id = random_id(4);
         let pty = Pty {
@@ -159,18 +159,29 @@ pub(crate) struct Started {
     pub child: Box<dyn Child + Send + Sync>,
 }
 
-fn start(size: PtySize, shell: &str, cwd: Option<&str>) -> Res<Started> {
+fn start(size: PtySize, shell: &str, cwd: Option<&str>, mode: Mode) -> Res<Started> {
+    #[cfg(windows)]
+    let (shell, path) = (
+        crate::platform::win::terminal_program(shell),
+        crate::platform::win::terminal_path(mode),
+    );
     // ConPTY มีตั้งแต่ Windows 10 1809 / Server 2019 — เครื่องเก่ากว่า (เช่น Server 2016) ใช้ WinPTY แทน
     #[cfg(windows)]
     if !crate::legacy_pty::has_conpty() {
-        return Ok(crate::legacy_pty::open(size, shell, cwd)?);
+        return Ok(crate::legacy_pty::open(size, &shell, cwd, path.as_deref())?);
     }
+    #[cfg(not(windows))]
+    let _ = mode;
     let pair = native_pty_system().openpty(size)?;
     let mut cmd = CommandBuilder::new(shell);
     if let Some(cwd) = cwd {
         cmd.cwd(cwd);
     }
     cmd.env("TERM", "xterm-256color");
+    #[cfg(windows)]
+    if let Some(path) = path {
+        cmd.env("Path", path);
+    }
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
     Ok(Started {

@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
-/// ใช้ไม่ได้ในโหมด service (ปิดอยู่ / ไม่มี helper / helper ตอบช้า) — ข้อความภาษาไทยพร้อมแสดงถึงผู้ใช้ปลายทาง
+/// ใช้ไม่ได้จากสถานะ helper หรือเซสชัน Windows ข้อความภาษาไทยพร้อมแสดงให้ผู้ใช้ปลายทาง
 pub const SCREEN_INPUT_UNAVAILABLE: i32 = -32004;
 /// จับภาพความละเอียดสูงหลายจอใช้เวลาได้ — นานกว่านี้ถือว่า helper ค้าง
 const HELPER_TIMEOUT: Duration = Duration::from_secs(20);

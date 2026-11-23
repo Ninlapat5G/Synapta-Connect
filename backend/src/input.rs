@@ -114,16 +114,89 @@ pub async fn rpc(method: &str, params: Value) -> Res<Value> {
     }
 }
 
-type InputResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-async fn run(job: impl FnOnce(&mut Enigo) -> InputResult + Send + 'static) -> Res<Value> {
+async fn run(job: impl FnOnce(&mut Enigo) -> enigo::InputResult<()> + Send + 'static) -> Res<Value> {
     tokio::task::spawn_blocking(move || -> Res<Value> {
         let _lock = INPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(windows)]
+        windows_input_ready()?;
+
         let mut enigo = Enigo::new(&Settings::default())?;
-        job(&mut enigo).map_err(|e| RpcError::new(crate::rpc::INTERNAL, e.to_string()))?;
+        if let Err(error) = job(&mut enigo) {
+            #[cfg(windows)]
+            if matches!(error, enigo::InputError::Simulate(_)) {
+                windows_input_ready()?;
+                return Err(input_unavailable(format!(
+                    "Windows รับอินพุตไม่ครบ อาจเกิดจากหน้าต่างใช้สิทธิ์สูงกว่าโปรเซสที่ส่งอินพุต (UIPI): {error}"
+                )));
+            }
+            return Err(error.into());
+        }
         Ok(json!({"ok": true}))
     })
     .await?
+}
+
+#[cfg(windows)]
+fn input_unavailable(reason: impl Into<String>) -> RpcError {
+    RpcError::new(crate::display::SCREEN_INPUT_UNAVAILABLE, reason)
+}
+
+#[cfg(windows)]
+fn windows_input_ready() -> Res<()> {
+    use windows::{
+        Win32::{
+            Foundation::HANDLE,
+            System::{
+                RemoteDesktop::{
+                    WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SESSION, WTSActive, WTSConnectState, WTSFreeMemory,
+                    WTSQuerySessionInformationW,
+                },
+                StationsAndDesktops::{GetThreadDesktop, GetUserObjectInformationW, UOI_IO},
+                Threading::GetCurrentThreadId,
+            },
+        },
+        core::{BOOL, PWSTR},
+    };
+
+    let mut buffer = PWSTR::null();
+    let mut bytes = 0;
+    // UOI_IO still checks the desktop if Remote Desktop Services can't report the session state.
+    unsafe {
+        if WTSQuerySessionInformationW(None, WTS_CURRENT_SESSION, WTSConnectState, &mut buffer, &mut bytes).is_ok()
+            && !buffer.is_null()
+        {
+            let state = (bytes as usize >= size_of::<WTS_CONNECTSTATE_CLASS>())
+                .then(|| buffer.0.cast::<WTS_CONNECTSTATE_CLASS>().read_unaligned());
+            WTSFreeMemory(buffer.0.cast());
+            if let Some(state) = state
+                && state != WTSActive
+            {
+                return Err(input_unavailable(format!(
+                    "เซสชัน Windows ไม่พร้อมรับอินพุต (WTSConnectState = {}) ให้เชื่อมต่อเซสชันของเจ้าของเครื่องอีกครั้ง",
+                    state.0
+                )));
+            }
+        }
+
+        // GetThreadDesktop returns a borrowed handle. UOI_IO checks whether it receives input now.
+        let desktop = GetThreadDesktop(GetCurrentThreadId())
+            .map_err(|error| input_unavailable(format!("อ่าน desktop ของโปรเซสที่ส่งอินพุตไม่ได้: {error}")))?;
+        let mut receives_input = BOOL::default();
+        GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_IO,
+            Some((&mut receives_input as *mut BOOL).cast()),
+            size_of::<BOOL>() as u32,
+            None,
+        )
+        .map_err(|error| input_unavailable(format!("ตรวจสถานะ desktop ที่รับอินพุตไม่ได้: {error}")))?;
+        if !receives_input.as_bool() {
+            return Err(input_unavailable(
+                "desktop ของโปรเซสที่ส่งอินพุตไม่ได้รับอินพุตอยู่ ให้ปลดล็อกเครื่องหรือกลับไปที่หน้าจอของผู้ใช้",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn modifier(name: &str) -> Res<Key> {

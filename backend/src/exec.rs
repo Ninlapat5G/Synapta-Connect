@@ -1,7 +1,7 @@
 //! รันคำสั่งแบบ single-shot: ส่งคืน stdout / stderr / exit code
 
-use crate::kill_tree::TreeGuard;
 use crate::rpc::{Res, RpcError};
+use crate::{config::Mode, kill_tree::TreeGuard};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
@@ -78,11 +78,17 @@ async fn collect(mut stream: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, boo
     (kept, truncated)
 }
 
-pub async fn run(p: Params) -> Res<Output> {
+pub async fn run(p: Params, mode: Mode) -> Res<Output> {
     let (program, args) = shell_invocation(p.shell.as_deref(), &p.command)?;
     tracing::info!(command = %p.command.chars().take(200).collect::<String>(), "exec.run");
 
-    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    let mut cmd = Command::new(crate::platform::win::terminal_program(&program));
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let _ = mode;
+        Command::new(program)
+    };
     cmd.args(args)
         .stdin(if p.stdin.is_some() {
             Stdio::piped()
@@ -94,6 +100,10 @@ pub async fn run(p: Params) -> Res<Output> {
         .kill_on_drop(true);
     if let Some(cwd) = &p.cwd {
         cmd.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    if let Some(path) = crate::platform::win::terminal_path(mode) {
+        cmd.env("Path", path);
     }
     if let Some(env) = &p.env {
         cmd.envs(env);
@@ -149,4 +159,48 @@ pub async fn run(p: Params) -> Res<Output> {
         truncated: t1 || t2,
         duration_ms: started.elapsed().as_millis(),
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn windows_shells_use_the_current_machine_path_in_service_mode() {
+        let expected = crate::platform::win::terminal_path(Mode::Service).expect("Windows machine PATH");
+        for (shell, command) in [("powershell", "$env:Path"), ("cmd", "set PATH")] {
+            let params = |env| Params {
+                command: command.into(),
+                shell: Some(shell.into()),
+                cwd: None,
+                timeout_ms: None,
+                env,
+                stdin: None,
+            };
+            let read_path = |result: Output| -> String {
+                assert_eq!(result.exit_code, Some(0), "{shell}: {}", result.stderr);
+                let output = result.stdout.trim_end_matches(['\r', '\n']);
+                if shell == "cmd" {
+                    output
+                        .lines()
+                        .filter_map(|line| line.split_once('='))
+                        .find_map(|(key, value)| key.eq_ignore_ascii_case("PATH").then_some(value))
+                        .expect("cmd PATH")
+                        .into()
+                } else {
+                    output.into()
+                }
+            };
+            assert_eq!(
+                read_path(run(params(None), Mode::Service).await.unwrap()),
+                expected.to_string_lossy()
+            );
+            let override_path = r"C:\Synapta Test\request-path";
+            let env = HashMap::from([("PATH".into(), override_path.into())]);
+            assert_eq!(
+                read_path(run(params(Some(env)), Mode::Service).await.unwrap()),
+                override_path
+            );
+        }
+    }
 }

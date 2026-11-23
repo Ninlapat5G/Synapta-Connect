@@ -81,9 +81,9 @@ pub fn has_conpty() -> bool {
 }
 
 /// เปิด shell ใน WinPTY
-pub fn open(size: PtySize, shell: &str, cwd: Option<&str>) -> Result<Started> {
+pub fn open(size: PtySize, shell: &OsStr, cwd: Option<&str>, path: Option<&OsStr>) -> Result<Started> {
     let data = DATA_DIR.get().context("ยังไม่ได้กำหนดโฟลเดอร์ข้อมูลของ WinPTY")?;
-    open_from(&unpack(data)?, size, shell, cwd)
+    open_from(&unpack(data)?, size, shell, cwd, path)
 }
 
 /// แตกไฟล์ลง `<data>\winpty\<hash>\` (ชื่อตาม hash: agent รุ่นใหม่ไม่ต้องเขียนทับไฟล์ที่ PTY เดิมยังเปิดอยู่)
@@ -104,17 +104,23 @@ fn unpack(data: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn open_from(dir: &Path, size: PtySize, shell: &str, cwd: Option<&str>) -> Result<Started> {
+fn open_from(dir: &Path, size: PtySize, shell: &OsStr, cwd: Option<&str>, path: Option<&OsStr>) -> Result<Started> {
     // shell อยู่ในอัญประกาศของ command line — อัญประกาศหรือ NUL ข้างในจะทำให้ CreateProcess แยกคำผิด
-    if shell.contains(['"', '\0']) || cwd.is_some_and(|dir| dir.contains('\0')) {
+    if shell.as_encoded_bytes().iter().any(|&byte| matches!(byte, b'"' | 0))
+        || cwd.is_some_and(|dir| dir.contains('\0'))
+    {
         bail!("shell หรือโฟลเดอร์เริ่มต้นมีอักขระที่ใช้ไม่ได้");
     }
     let api = Api::open(&dir.join("winpty.dll")).map_err(|e| anyhow::anyhow!("โหลด WinPTY ไม่ได้: {e:?}"))?;
     let session = Session::start(api, size)?;
 
-    let command = wide(format!("\"{shell}\""));
+    let mut command = OsString::from("\"");
+    command.push(shell);
+    command.push("\"");
+    let command = wide(command);
     let cwd = cwd.map(wide);
-    let child = session.spawn(&command, cwd.as_deref())?;
+    let env = path.map(environment_with_path);
+    let child = session.spawn(&command, cwd.as_deref(), env.as_deref())?;
 
     let (conin, conout) = unsafe {
         let conin = (session.api.winpty_conin_name)(session.pty);
@@ -177,14 +183,14 @@ impl Session {
         }
     }
 
-    fn spawn(&self, command: &[u16], cwd: Option<&[u16]>) -> Result<Process> {
+    fn spawn(&self, command: &[u16], cwd: Option<&[u16]>, env: Option<&[u16]>) -> Result<Process> {
         unsafe {
             let config = (self.api.winpty_spawn_config_new)(
                 SPAWN_AUTO_SHUTDOWN,
                 ptr::null(),
                 command.as_ptr(),
                 cwd.map_or(ptr::null(), |dir| dir.as_ptr()),
-                ptr::null(), // env: ใช้ของ agent
+                env.map_or(ptr::null(), |block| block.as_ptr()),
                 ptr::null_mut(),
             );
             if config.is_null() {
@@ -309,6 +315,22 @@ fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
     text.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+fn environment_with_path(path: &OsStr) -> Vec<u16> {
+    let mut vars = std::env::vars_os()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("Path"))
+        .collect::<Vec<_>>();
+    vars.push(("Path".into(), path.to_owned()));
+    vars.sort_by_cached_key(|(key, _)| key.to_ascii_uppercase());
+    let mut block = Vec::new();
+    for (key, value) in vars {
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(wide(value));
+    }
+    block.push(0);
+    block
+}
+
 unsafe fn from_wide(text: *const u16) -> PathBuf {
     let mut len = 0;
     while unsafe { *text.add(len) } != 0 {
@@ -330,7 +352,15 @@ mod tests {
         // แตกซ้ำต้องใช้ไฟล์เดิมได้ (ไม่เขียนทับ)
         assert_eq!(unpack(&data).unwrap(), dir);
 
-        let mut pty = open_from(&dir, PtySize::default(), "cmd.exe", None).unwrap();
+        let test_path = r"C:\Synapta Test\terminal-path";
+        let mut pty = open_from(
+            &dir,
+            PtySize::default(),
+            OsStr::new("cmd.exe"),
+            None,
+            Some(OsStr::new(test_path)),
+        )
+        .unwrap();
         pty.master
             .resize(PtySize {
                 rows: 30,
@@ -340,11 +370,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(pty.master.get_size().unwrap().cols, 100);
-        pty.writer.write_all(b"echo SYNAPTA_LEGACY_TEST\r\nexit 7\r\n").unwrap();
+        pty.writer.write_all(b"echo %PATH%\r\nexit 7\r\n").unwrap();
         pty.writer.flush().unwrap();
         let mut output = String::new();
         let _ = pty.reader.read_to_string(&mut output);
-        assert!(output.contains("SYNAPTA_LEGACY_TEST"), "{output}");
+        assert!(output.contains(test_path), "{output}");
         assert_eq!(pty.child.wait().unwrap().exit_code(), 7);
         drop(pty);
         let _ = std::fs::remove_dir_all(&data);
@@ -353,7 +383,14 @@ mod tests {
     #[test]
     fn winpty_kill_ends_shell() {
         let data = std::env::temp_dir().join(format!("synapta-winpty-{}", crate::hex::random_id(4)));
-        let mut pty = open_from(&unpack(&data).unwrap(), PtySize::default(), "cmd.exe", None).unwrap();
+        let mut pty = open_from(
+            &unpack(&data).unwrap(),
+            PtySize::default(),
+            OsStr::new("cmd.exe"),
+            None,
+            None,
+        )
+        .unwrap();
         pty.child.clone_killer().kill().unwrap();
         assert!(!pty.child.wait().unwrap().success());
         drop(pty);
@@ -362,9 +399,15 @@ mod tests {
 
     #[test]
     fn rejects_quote_in_shell() {
-        let err = open_from(Path::new("unused"), PtySize::default(), "cmd.exe\" /c calc", None)
-            .err()
-            .unwrap();
+        let err = open_from(
+            Path::new("unused"),
+            PtySize::default(),
+            OsStr::new("cmd.exe\" /c calc"),
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(err.to_string().contains("อักขระ"));
     }
 }

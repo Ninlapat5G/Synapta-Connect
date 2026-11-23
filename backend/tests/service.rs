@@ -456,7 +456,7 @@ async fn update_api_check_apply_retry_and_settings() {
     assert!(!s.app.settings.get().update.auto_update, "บันทึกลงค่าตั้งจริง");
 }
 
-/// helper ปลอมที่ต่อเข้ามาและตอบทุกคำขอด้วยชื่อ method
+/// helper ปลอมที่ต่อเข้ามาเพื่อทดสอบการส่งผลสำเร็จและข้อผิดพลาดกลับจาก helper
 type HelperSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// ขั้นจับมือของ helper: ส่ง nonce + proof (ไม่ส่ง token) → ได้ socket + หัวข้อ proof ของฝั่ง agent
@@ -502,7 +502,14 @@ async fn connect_helper(s: &Svc, secret: &str, user: &str) -> Result<tokio::task
         while let Some(Ok(msg)) = stream.next().await {
             if let Message::Text(text) = msg {
                 let v: Value = serde_json::from_str(&text).unwrap();
-                let reply = json!({"id": v["id"], "result": {"handled": v["method"]}});
+                let reply = if v["method"] == "input.key" {
+                    json!({"id": v["id"], "error": {
+                        "code": -32004,
+                        "message": "desktop ของ helper ไม่ได้รับอินพุตอยู่",
+                    }})
+                } else {
+                    json!({"id": v["id"], "result": {"handled": v["method"]}})
+                };
                 if sink.send(Message::Text(reply.to_string().into())).await.is_err() {
                     break;
                 }
@@ -551,6 +558,9 @@ async fn screen_and_input_go_only_through_an_allowed_helper() {
         (Some(true), Some(true), Some("owner"))
     );
     assert_eq!(call("input.click").await.unwrap(), json!({"handled": "input.click"}));
+    let error = call("input.key").await.unwrap_err();
+    assert_eq!(error.code, -32004);
+    assert_eq!(error.message, "desktop ของ helper ไม่ได้รับอินพุตอยู่");
 
     // 3) helper ตัวที่สองถูกปฏิเสธ ตัวแรกยังเป็นของจริง
     let second = connect_helper(&s, &s.file_token(), "intruder").await.unwrap();
