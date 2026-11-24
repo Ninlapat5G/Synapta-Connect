@@ -25,7 +25,8 @@ use tokio::sync::{mpsc, oneshot};
 /// ใช้ไม่ได้จากสถานะ helper หรือเซสชัน Windows ข้อความภาษาไทยพร้อมแสดงให้ผู้ใช้ปลายทาง
 pub const SCREEN_INPUT_UNAVAILABLE: i32 = -32004;
 /// จับภาพความละเอียดสูงหลายจอใช้เวลาได้ — นานกว่านี้ถือว่า helper ค้าง
-const HELPER_TIMEOUT: Duration = Duration::from_secs(20);
+/// ต้องต่ำกว่าเพดาน 15 วินาทีของ SynaptaCode ไม่งั้นผู้ใช้ได้ "timeout" แทนข้อความที่บอกสาเหตุ
+const HELPER_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// method ที่ helper ยอมทำ — ที่เหลือถูกปฏิเสธ แม้ service ถูกหลอกให้ส่งมา
 pub fn is_display_method(method: &str) -> bool {
@@ -165,14 +166,19 @@ impl Display {
             params,
             reply,
         };
-        jobs.send(job)
+        // The deadline covers queueing too: when the link to the helper stalls, its queue (8 jobs) fills and
+        // `send` waits with no end, so a call used to hang past its timeout.
+        let request = async {
+            jobs.send(job)
+                .await
+                .map_err(|_| unavailable(what, "helper หลุดการเชื่อมต่อ"))?;
+            answer
+                .await
+                .unwrap_or_else(|_| Err(unavailable(what, "helper หลุดการเชื่อมต่อระหว่างทำงาน")))
+        };
+        tokio::time::timeout(timeout, request)
             .await
-            .map_err(|_| unavailable(what, "helper หลุดการเชื่อมต่อ"))?;
-        match tokio::time::timeout(timeout, answer).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(unavailable(what, "helper หลุดการเชื่อมต่อระหว่างทำงาน")),
-            Err(_) => Err(unavailable(what, "helper ตอบช้าเกินกำหนด")),
-        }
+            .unwrap_or_else(|_| Err(unavailable(what, "helper ตอบช้าเกินกำหนด")))
     }
 
     /// ให้ output ของ terminal `pty_id` ที่ helper เปิด ไปถึง client เจ้าของ terminal
@@ -290,6 +296,8 @@ impl Display {
                     _ => {}
                 },
                 _ = ping.tick() => {
+                    // Forget jobs whose caller already timed out, or a helper that never answers grows this map forever.
+                    pending.retain(|_, reply| !reply.is_closed());
                     if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }

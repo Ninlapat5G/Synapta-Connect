@@ -21,21 +21,22 @@ use windows::{
             },
             WindowsAndMessaging::{
                 AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DestroyWindow, DispatchMessageW, FindWindowExW, GetClassNameW, GetCursorPos, GetMessageW, HICON, IDYES,
-                IsIconic, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED,
-                MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-                RegisterWindowMessageW, SW_RESTORE, SendMessageW, SetForegroundWindow, SetMenuDefaultItem, ShowWindow,
-                TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-                WNDCLASSW,
+                DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, HICON, IDYES, IsIconic,
+                MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
+                MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+                SW_RESTORE, SendMessageW, SetForegroundWindow, SetMenuDefaultItem, ShowWindow, TPM_NONOTIFY,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
             },
         },
     },
     core::{HSTRING, PCWSTR, w},
 };
 
-/// ชื่อหน้าต่างของแอป Desktop (tauri.conf.json) — ใช้หาหน้าต่างที่เปิดอยู่แล้วแทนการเปิดซ้ำ
+/// ชื่อหน้าต่างและ window class ของแอป Desktop — ต้องตรงกับ `title` / `windowClassname` ใน tauri.conf.json
+/// ใช้หาหน้าต่างที่เปิดอยู่แล้วแทนการเปิดซ้ำ
 const DESKTOP_TITLE: PCWSTR = w!("Synapta Connect");
+const DESKTOP_CLASS: PCWSTR = w!("SynaptaConnectDesktop");
 const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 
@@ -86,25 +87,20 @@ pub fn set_online(online: bool) {
 
 /// ดึงหน้าต่าง Desktop ที่เปิดอยู่ขึ้นมาข้างหน้า — false ถ้ายังไม่มีหน้าต่างเปิด
 pub fn focus_desktop() -> bool {
-    let mut after = None;
-    loop {
-        let Ok(window) = (unsafe { FindWindowExW(None, after, PCWSTR::null(), DESKTOP_TITLE) }) else {
-            return false;
-        };
-        // MessageBox ของโปรแกรมใช้ชื่อเดียวกัน (class #32770) — ไม่ใช่หน้าต่างแอป
-        let mut class = [0u16; 16];
-        let length = unsafe { GetClassNameW(window, &mut class) }.max(0) as usize;
-        if String::from_utf16_lossy(&class[..length]) != "#32770" {
-            unsafe {
-                if IsIconic(window).as_bool() {
-                    let _ = ShowWindow(window, SW_RESTORE);
-                }
-                let _ = SetForegroundWindow(window);
-            }
-            return true;
+    // Match the window class too, not just the title. Until 0.3.15 any top-level window titled "Synapta Connect"
+    // counted: a File Explorer tab on a folder with that name (Windows 11 keeps one hidden proxy window per tab,
+    // titled with the folder name), our own MessageBox, a browser window... Desktop then "focused" that window and
+    // exited with code 0, so double-clicking the exe or the shortcut, or finishing the installer, showed nothing.
+    let Ok(window) = (unsafe { FindWindowW(DESKTOP_CLASS, DESKTOP_TITLE) }) else {
+        return false;
+    };
+    unsafe {
+        if IsIconic(window).as_bool() {
+            let _ = ShowWindow(window, SW_RESTORE);
         }
-        after = Some(window);
+        let _ = SetForegroundWindow(window);
     }
+    true
 }
 
 fn run() -> windows::core::Result<()> {

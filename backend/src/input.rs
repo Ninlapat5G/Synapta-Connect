@@ -53,7 +53,7 @@ pub async fn rpc(method: &str, params: Value) -> Res<Value> {
     match method {
         "input.mouse_move" => {
             let p: MoveParams = parse(params)?;
-            run(move |e| Ok(e.move_mouse(p.x, p.y, Coordinate::Abs)?)).await
+            run(move |e| e.move_mouse(p.x, p.y, Coordinate::Abs)).await
         }
         "input.click" => {
             let p: ClickParams = parse(params)?;
@@ -91,7 +91,7 @@ pub async fn rpc(method: &str, params: Value) -> Res<Value> {
         }
         "input.type" => {
             let p: TypeParams = parse(params)?;
-            run(move |e| Ok(e.text(&p.text)?)).await
+            run(move |e| e.text(&p.text)).await
         }
         "input.key" => {
             let p: KeyParams = parse(params)?;
@@ -106,7 +106,7 @@ pub async fn rpc(method: &str, params: Value) -> Res<Value> {
                 for m in mods.iter().rev() {
                     e.key(*m, Direction::Release)?;
                 }
-                Ok(pressed?)
+                pressed
             })
             .await
         }

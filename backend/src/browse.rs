@@ -4,18 +4,21 @@
 //! รูปผลลัพธ์ต้องตรงกับ `connectPathResult` ใน SynaptaCode (server/src/connect/schemas.ts) — ฟิลด์ที่ไม่มีค่าต้อง "ไม่ส่ง" ห้ามส่ง null
 
 use crate::file_access::{self, display_path};
-use crate::rpc::{Res, RpcError, to_value};
+use crate::rpc::{self, Res, RpcError, to_value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// จำนวนรายการต่อหน้าสูงสุด (SynaptaCode รับได้ไม่เกิน 100)
 const MAX_PAGE: usize = 100;
 /// อ่านต้นไฟล์มาทำพรีวิวไม่เกินเท่านี้ — ได้ไม่เกิน 16384 ตัวอักษร ต่ำกว่าเพดาน 32768 ของ SynaptaCode
 const PREVIEW_BYTES: usize = 16 * 1024;
+/// ตอบภายในเวลานี้เสมอ — ต่ำกว่าเพดาน 15 วินาทีของ SynaptaCode
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 pub struct OpenPathParams {
@@ -63,7 +66,16 @@ enum Opened {
 
 pub async fn open_path(params: OpenPathParams, roots: &[PathBuf]) -> Res<Value> {
     let roots = roots.to_vec();
-    let opened = tokio::task::spawn_blocking(move || open(params, &roots)).await??;
+    // Reading a hung drive can block forever (seen on app01 with a stuck USB stick). Answer in time instead of
+    // hanging the request: SynaptaCode gives up after 15 s. The blocked thread stays stuck until the drive answers.
+    let opened = tokio::time::timeout(OPEN_TIMEOUT, tokio::task::spawn_blocking(move || open(params, &roots)))
+        .await
+        .map_err(|_| {
+            RpcError::new(
+                rpc::INTERNAL,
+                "ไดรฟ์หรือโฟลเดอร์นี้ไม่ตอบสนอง (อาจเป็นไดรฟ์ USB ที่ค้าง) ลองถอดแล้วเสียบใหม่",
+            )
+        })???;
     to_value(opened)
 }
 
@@ -107,10 +119,7 @@ fn top_level(roots: &[PathBuf]) -> Vec<Entry> {
     let dirs: Vec<PathBuf> = if !roots.is_empty() {
         roots.to_vec()
     } else if cfg!(windows) {
-        (b'A'..=b'Z')
-            .map(|d| PathBuf::from(format!("{}:\\", d as char)))
-            .filter(|d| d.exists())
-            .collect()
+        drive_letters()
     } else {
         vec![PathBuf::from("/")]
     };
@@ -125,6 +134,22 @@ fn top_level(roots: &[PathBuf]) -> Vec<Entry> {
             }
         })
         .collect()
+}
+
+/// Drive letters from the system bitmask, without touching any media. Checking `exists()` on each letter reads the
+/// volume, and on app01 a hung USB stick never answers that read, so the whole drive list would hang with it.
+#[cfg(windows)]
+fn drive_letters() -> Vec<PathBuf> {
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn drive_letters() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn list_directory(dir: &Path, roots: &[PathBuf], offset: usize, limit: usize) -> Res<Opened> {

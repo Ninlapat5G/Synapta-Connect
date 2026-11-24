@@ -3,7 +3,11 @@
 use crate::{netif, rpc::Res};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use sysinfo::{
     Disks, MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users,
 };
@@ -53,15 +57,7 @@ fn collect() -> Res<Value> {
     std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
     sys.refresh_cpu_usage();
 
-    let disks: Vec<Value> = Disks::new_with_refreshed_list()?
-        .iter()
-        .map(|d| {
-            json!({"name": d.name().to_string_lossy(), "mount": d.mount_point(),
-                   "file_system": d.file_system().to_string_lossy(),
-                   "total_bytes": d.total_space(), "available_bytes": d.available_space(),
-                   "removable": d.is_removable()})
-        })
-        .collect();
+    let disks = disks_with_timeout();
 
     Ok(json!({
         "hostname": System::host_name().ok(),
@@ -72,12 +68,52 @@ fn collect() -> Res<Value> {
                 "logical_cores": sys.cpus().len(),
                 "usage_percent": sys.global_cpu_usage()},
         "memory": {"total_bytes": sys.total_memory(), "available_bytes": sys.available_memory()},
-        "disks": disks,
+        "disks_complete": disks.is_some(),
+        "disks": disks.unwrap_or_default(),
         "network": netif::list(),
         "privilege": privilege()?,
         "agent": {"version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(),
                   "mode": if is_service_account() { "service" } else { "console" }},
     }))
+}
+
+/// How long `system.profile` waits for the disk list before replying without it.
+const DISK_TIMEOUT: Duration = Duration::from_secs(3);
+/// A disk probe thread is still running (possibly stuck forever on a hung drive).
+static DISK_PROBE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Disk list, or None when it did not finish in time.
+///
+/// On app01 a USB stick hung so that GetVolumeInformationW on its drive never returned (even with
+/// SEM_FAILCRITICALERRORS, and the thread could not be killed). The probe ran inline, so every `system.profile`
+/// call (connect_info) hung until the client timed out and leaked one more stuck thread. Now the probe runs in its
+/// own thread with a deadline, and no new probe starts while an old one is still stuck.
+fn disks_with_timeout() -> Option<Vec<Value>> {
+    if DISK_PROBE_RUNNING.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let disks = list_disks();
+        DISK_PROBE_RUNNING.store(false, Ordering::Release);
+        let _ = sender.send(disks);
+    });
+    receiver.recv_timeout(DISK_TIMEOUT).ok().flatten()
+}
+
+fn list_disks() -> Option<Vec<Value>> {
+    let disks = Disks::new_with_refreshed_list().ok()?;
+    Some(
+        disks
+            .iter()
+            .map(|d| {
+                json!({"name": d.name().to_string_lossy(), "mount": d.mount_point(),
+                       "file_system": d.file_system().to_string_lossy(),
+                       "total_bytes": d.total_space(), "available_bytes": d.available_space(),
+                       "removable": d.is_removable()})
+            })
+            .collect(),
+    )
 }
 
 pub fn privilege() -> Res<Privilege> {

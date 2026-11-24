@@ -141,6 +141,7 @@ route ที่ต้องมีใบรับรองแต่ไม่ม�
  "cpu": {"model": "…", "physical_cores": 8, "logical_cores": 16, "usage_percent": 7.5},
  "memory": {"total_bytes": 0, "available_bytes": 0},
  "disks": [{"name","mount","file_system","total_bytes","available_bytes","removable"}],
+"disks_complete": true,   // false = รายการไดรฟ์ไม่เสร็จใน 3 วินาที (ไดรฟ์ค้าง) จึงส่ง disks เป็น [] — 0.3.16+
  "network": [ … ],
  "privilege": {"level": "standard|administrator|system|service|root", "user": "…"},
  "agent": {"version": "0.3.3", "pid": 1234, "mode": "console|service"},
