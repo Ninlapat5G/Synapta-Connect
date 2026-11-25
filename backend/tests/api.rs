@@ -537,6 +537,107 @@ async fn upload_resumes_verifies_checksum_and_downloads_by_range() {
 }
 
 #[tokio::test]
+async fn parallel_upload_accepts_chunks_out_of_order_and_resumes() {
+    let a = start_paired().await;
+    let http = a.authed();
+    let chunk = 4 * 1024 * 1024;
+    // 2 chunk เต็ม + chunk สุดท้ายที่สั้นกว่า
+    let data: Vec<u8> = (0..(chunk * 2 + 1000) as u32).map(|i| (i * 31 % 251) as u8).collect();
+    let sha = to_hex(&Sha256::digest(&data));
+    let dest = a.dir.join("parallel").join("big.bin");
+    let dest_str = dest.to_string_lossy().to_string();
+    let begin = || {
+        a.call(
+            "transfer.begin",
+            json!({"path": dest_str, "size": data.len(), "sha256": sha, "parallel": true}),
+        )
+    };
+    let put = |id: &str, start: usize, end: usize| {
+        http.put(a.url(&format!("/api/v1/transfers/{id}?offset={start}")))
+            .body(data[start..end].to_vec())
+            .send()
+    };
+
+    let first = begin().await;
+    assert_eq!(first["mode"], "parallel", "{first}");
+    assert_eq!(first["unit"], 1024 * 1024);
+    // ขนาดและจำนวนคำนวณจาก RAM ของเครื่อง — แค่ต้องอยู่ในกรอบ และ chunk_size ไม่เกิน 4 MiB (SynaptaCode 1.0.108)
+    assert!(first["chunk_size"].as_u64().unwrap() <= chunk as u64);
+    assert!(first["max_chunk_size"].as_u64().unwrap() >= 1024 * 1024);
+    assert!(first["max_parallel"].as_u64().unwrap() >= 2);
+    assert_eq!(first["missing"], json!([[0, data.len()]]));
+    let id = first["transfer_id"].as_str().unwrap().to_string();
+
+    // chunk สุดท้ายมาก่อน, chunk ที่ไม่อยู่ขอบหรือยาวไม่เต็มถูกปฏิเสธ
+    assert_eq!(put(&id, chunk * 2, data.len()).await.unwrap().status(), 200);
+    assert_eq!(put(&id, 10, chunk + 10).await.unwrap().status(), 400);
+    assert_eq!(put(&id, 0, 100).await.unwrap().status(), 400);
+
+    // สัญญาณหลุดแล้วเริ่มใหม่: ได้ช่วงที่ยังขาด
+    let again = begin().await;
+    assert_eq!(again["resumed"], true);
+    assert_eq!(again["missing"], json!([[0, chunk * 2]]));
+    let id = again["transfer_id"].as_str().unwrap().to_string();
+
+    // ส่งพร้อมกันด้วย chunk คนละขนาด (1 MiB, 3 MiB, 4 MiB) และส่งซ้ำได้
+    let mib = 1024 * 1024;
+    let (r1, r2, r3) = tokio::join!(put(&id, chunk, chunk * 2), put(&id, 0, mib), put(&id, mib, chunk));
+    assert_eq!(r1.unwrap().status(), 200);
+    assert_eq!(r2.unwrap().status(), 200);
+    assert_eq!(r3.unwrap().status(), 200);
+    assert_eq!(put(&id, 0, chunk).await.unwrap().status(), 200);
+
+    let done = a.call("transfer.finish", json!({"transfer_id": id})).await;
+    assert_eq!(done["sha256"], sha, "{done}");
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+    assert!(!std::path::Path::new(&format!("{dest_str}.synapta-part.map")).exists());
+}
+
+#[tokio::test]
+async fn parallel_and_sequential_uploads_resume_each_other_safely() {
+    let a = start_paired().await;
+    let http = a.authed();
+    let chunk = 4 * 1024 * 1024;
+    let data: Vec<u8> = (0..(chunk + 500) as u32).map(|i| (i % 253) as u8).collect();
+    let sha = to_hex(&Sha256::digest(&data));
+    let dest_str = a.dir.join("mixed.bin").to_string_lossy().to_string();
+    let begin = |parallel: bool| {
+        a.call(
+            "transfer.begin",
+            json!({"path": dest_str, "size": data.len(), "sha256": sha, "parallel": parallel}),
+        )
+    };
+
+    // โหมดเดิมส่งไปเกิน chunk แรก → โหมดขนานนับ chunk แรกว่าได้แล้ว
+    let old = begin(false).await;
+    let id = old["transfer_id"].as_str().unwrap();
+    for (start, end) in [(0, chunk), (chunk, chunk + 100)] {
+        let res = http
+            .put(a.url(&format!("/api/v1/transfers/{id}?offset={start}")))
+            .body(data[start..end].to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+    // body เกิน 16 MiB ถูกตัดก่อนถึง handler
+    let res = http
+        .put(a.url(&format!("/api/v1/transfers/{id}?offset={}", chunk + 100)))
+        .body(vec![0u8; 16 * 1024 * 1024 + 1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 413);
+    let parallel = begin(true).await;
+    assert_eq!(parallel["missing"], json!([[chunk, data.len()]]), "{parallel}");
+
+    // ไฟล์ค้างของโหมดขนาน (มีช่องว่างได้) → โหมดเดิมต้องเริ่มจาก 0
+    let back = begin(false).await;
+    assert_eq!(back["offset"], 0, "{back}");
+    assert!(!std::path::Path::new(&format!("{dest_str}.synapta-part.map")).exists());
+}
+
+#[tokio::test]
 async fn concurrent_uploads_to_one_destination_are_refused_by_operation_id() {
     let a = start_paired().await;
     let dest = a.dir.join("shared.bin").to_string_lossy().to_string();

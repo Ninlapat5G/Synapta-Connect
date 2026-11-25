@@ -4,24 +4,33 @@
 //! ไฟล์ที่ยังไม่ครบอยู่ที่ `<path>.synapta-part`; ความคืบหน้า = ขนาดไฟล์นั้น จึงต่อได้แม้ agent restart
 //! (client เรียก transfer.begin ด้วยพารามิเตอร์เดิมแล้วได้ `offset` ที่ต้องส่งต่อ)
 //! ดาวน์โหลด: transfer.stat ขอ size+sha256 แล้ว GET /api/v1/files?path=... (รองรับ Range)
+//!
+//! โหมดขนาน (`parallel: true` ใน transfer.begin, ตั้งแต่ 0.3.18): client ส่งหลาย chunk พร้อมกันแบบ IDM
+//! chunk เริ่มที่ขอบ `UNIT` ยาวเท่าไรก็ได้ภายในเพดานที่ transfer_plan.rs คำนวณจากเครื่องตอนนั้น
+//! เขียนลงตำแหน่งของมันใน `.synapta-part` และจดว่าได้ช่วงไหนแล้วใน `<path>.synapta-part.map`
+//! จึงต่อได้แม้ agent restart · ดาวน์โหลดแบบขนานใช้ Range หลายช่วงพร้อมกันได้อยู่แล้ว
 
-use crate::file_access;
 use crate::hex::{random_id, to_hex};
 use crate::rpc::{CONFLICT, Res, RpcError, parse};
-use serde::Deserialize;
+use crate::transfer_plan::{self, UNIT};
+use crate::{file_access, fsutil};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 /// ขนาด chunk ที่แนะนำ (client ใช้ 64 KiB – 1 MiB ได้ ตัวเลขนี้คือค่ากลางที่ดีบน LAN/VPN)
 pub const CHUNK_SIZE: u64 = 512 * 1024;
 pub const MAX_CHUNK: usize = 1024 * 1024;
+/// body ใหญ่สุดที่ PUT /api/v1/transfers รับ (http.rs ตั้งตามนี้)
+pub const MAX_BODY: usize = transfer_plan::MAX_CHUNK as usize;
 /// งานอัปโหลดที่ไม่มี chunk เข้ามานานเท่านี้ถือว่าทิ้งแล้ว — งานใหม่ที่ operation_id ต่างกันเขียนทับที่เดิมได้
 const STALE_UPLOAD: Duration = Duration::from_secs(120);
 
@@ -32,6 +41,112 @@ struct Upload {
     /// รหัสงานจาก client (SynaptaCode ส่งมาตั้งแต่ v1.0.101) — None = client รุ่นเก่า
     operation_id: Option<String>,
     touched: Instant,
+    /// Some = โหมดขนาน (chunk มาไม่เรียงได้) · None = โหมดเดิม ต่อท้ายทีละก้อน
+    ranges: Option<Arc<Mutex<Ranges>>>,
+}
+
+/// ช่วงไหนของโหมดขนานได้แล้วบ้าง (ทีละ `UNIT`) — เก็บเป็นไฟล์ `.synapta-part.map` คู่กับไฟล์ค้าง
+/// มี size/sha256 กำกับ เพื่อไม่เอาไฟล์ค้างของอีกไฟล์ที่ชื่อเดียวกันมาต่อ
+#[derive(Serialize, Deserialize)]
+struct Ranges {
+    size: u64,
+    sha256: String,
+    unit: u64,
+    /// bitmap เป็น hex: bit i = ได้ unit i แล้ว (ไฟล์ 100 GB = map ราว 25 KB)
+    done: String,
+    #[serde(skip)]
+    bits: Vec<u8>,
+}
+
+impl Ranges {
+    fn new(size: u64, sha256: &str) -> Ranges {
+        let units = size.div_ceil(UNIT) as usize;
+        Ranges {
+            size,
+            sha256: sha256.to_string(),
+            unit: UNIT,
+            done: String::new(),
+            bits: vec![0; units.div_ceil(8)],
+        }
+    }
+
+    fn save(&mut self, path: &Path) -> std::io::Result<()> {
+        self.done = to_hex(&self.bits);
+        fsutil::atomic_write(
+            &map_path(path),
+            &serde_json::to_vec(self).map_err(std::io::Error::other)?,
+        )
+    }
+
+    fn load(path: &Path) -> Option<Ranges> {
+        let mut saved = fsutil::read_json::<Ranges>(&map_path(path))?;
+        saved.bits = (0..saved.done.len() / 2)
+            .map(|i| u8::from_str_radix(saved.done.get(i * 2..i * 2 + 2)?, 16).ok())
+            .collect::<Option<_>>()?;
+        Some(saved)
+    }
+
+    fn chunks(&self) -> u64 {
+        self.size.div_ceil(self.unit)
+    }
+
+    fn has(&self, i: u64) -> bool {
+        self.bits[(i / 8) as usize] & (1 << (i % 8)) != 0
+    }
+
+    fn mark(&mut self, i: u64) {
+        self.bits[(i / 8) as usize] |= 1 << (i % 8);
+    }
+
+    /// ขนาดของ unit ที่ i (unit สุดท้ายอาจสั้นกว่า)
+    fn len_of(&self, i: u64) -> u64 {
+        self.unit.min(self.size - i * self.unit)
+    }
+
+    fn received_bytes(&self) -> u64 {
+        (0..self.chunks())
+            .filter(|&i| self.has(i))
+            .map(|i| self.len_of(i))
+            .sum()
+    }
+
+    fn complete(&self) -> bool {
+        (0..self.chunks()).all(|i| self.has(i))
+    }
+
+    /// ช่วงไบต์ที่ยังขาด `[start, end)` รวมช่วงที่ติดกันแล้ว
+    fn missing(&self) -> Vec<[u64; 2]> {
+        let mut out: Vec<[u64; 2]> = Vec::new();
+        for i in (0..self.chunks()).filter(|&i| !self.has(i)) {
+            let (start, end) = (i * self.unit, i * self.unit + self.len_of(i));
+            match out.last_mut() {
+                Some(last) if last[1] == start => last[1] = end,
+                _ => out.push([start, end]),
+            }
+        }
+        out
+    }
+
+    /// ต่อจากไฟล์ค้างที่มีอยู่: map ของงานเดียวกัน = ใช้ต่อ · ไม่มี map แต่มีไฟล์ค้างของโหมดเดิม
+    /// (ข้อมูลเรียงจากต้นไฟล์) = chunk ที่อยู่ในส่วนนั้นครบแล้ว · นอกนั้น = เริ่มใหม่
+    fn resume(path: &Path, size: u64, sha256: &str) -> Ranges {
+        let fresh = Ranges::new(size, sha256);
+        if let Some(saved) = Ranges::load(path) {
+            let same_job = saved.size == size
+                && saved.sha256 == sha256
+                && saved.unit == UNIT
+                && saved.bits.len() == fresh.bits.len();
+            return if same_job { saved } else { fresh };
+        }
+        let mut ranges = fresh;
+        let have = part_len(path).min(size);
+        for i in 0..ranges.chunks() {
+            if i * ranges.unit + ranges.len_of(i) <= have {
+                ranges.mark(i);
+            }
+        }
+        ranges
+    }
 }
 
 pub struct Transfers {
@@ -48,6 +163,9 @@ struct BeginParams {
     #[serde(default)]
     overwrite: bool,
     operation_id: Option<String>,
+    /// client ส่ง chunk หลายก้อนพร้อมกันได้ (ดูหัวไฟล์)
+    #[serde(default)]
+    parallel: bool,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +182,38 @@ fn part_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".synapta-part");
     name.into()
+}
+
+fn map_path(path: &Path) -> PathBuf {
+    let mut name = part_path(path).into_os_string();
+    name.push(".map");
+    name.into()
+}
+
+/// ทิ้งไฟล์ค้างทั้งสองไฟล์ของปลายทางนี้
+fn remove_partial(path: &Path) {
+    let _ = std::fs::remove_file(part_path(path));
+    let _ = std::fs::remove_file(map_path(path));
+}
+
+/// เขียน `data` ที่ตำแหน่ง `offset` โดยไม่ใช้ cursor ร่วม — หลาย chunk เขียนไฟล์เดียวพร้อมกันได้
+#[cfg(windows)]
+fn write_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !data.is_empty() {
+        let n = file.seek_write(data, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        data = &data[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(file, data, offset)
 }
 
 fn part_len(path: &Path) -> u64 {
@@ -134,43 +284,77 @@ impl Transfers {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // ไฟล์ค้างที่ใหญ่กว่าไฟล์จริง = ของคนละงาน เริ่มใหม่
-        let mut offset = part_len(&path);
-        if offset > p.size {
-            std::fs::remove_file(part_path(&path))?;
-            offset = 0;
-        }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(part_path(&path))?;
-
+        let sha256 = p.sha256.to_lowercase();
+        check_free_space(&path, p.size)?;
         let id = random_id(8);
-        uploads.insert(
-            id.clone(),
-            Upload {
-                path,
-                size: p.size,
-                sha256: p.sha256.to_lowercase(),
-                operation_id: p.operation_id,
-                touched: Instant::now(),
-            },
-        );
-        Ok(json!({"transfer_id": id, "offset": offset, "chunk_size": CHUNK_SIZE,
-                  "max_chunk_size": MAX_CHUNK, "resumed": offset > 0}))
+        let mut upload = Upload {
+            path: path.clone(),
+            size: p.size,
+            sha256: sha256.clone(),
+            operation_id: p.operation_id,
+            touched: Instant::now(),
+            ranges: None,
+        };
+        let reply = if p.parallel {
+            let mut ranges = Ranges::resume(&path, p.size, &sha256);
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(part_path(&path))?;
+            ranges.save(&path)?;
+            let active = uploads
+                .values()
+                .filter(|up| up.ranges.is_some() && up.touched.elapsed() < STALE_UPLOAD)
+                .count();
+            let plan = transfer_plan::plan(transfer_plan::available_ram(), active);
+            let missing = ranges.missing();
+            // client 1.0.108 ใช้ chunk_size เป็นขอบ chunk และตรวจว่าทุกช่วงที่ขาดเริ่มที่ขอบนั้น
+            // ช่วงที่ขาดเริ่มที่ขอบ UNIT ได้ (ต่อจากโหมดเดิมหรือ client ที่ใช้ chunk ขนาดอื่น) — ไม่ตรงขอบก็เสนอ UNIT แทน
+            let chunk_size = if missing.iter().all(|r| r[0].is_multiple_of(plan.chunk_size)) {
+                plan.chunk_size
+            } else {
+                UNIT
+            };
+            let received = ranges.received_bytes();
+            let reply = json!({"transfer_id": id, "mode": "parallel", "unit": UNIT, "chunk_size": chunk_size,
+                               "max_chunk_size": plan.max_chunk_size, "max_parallel": plan.max_parallel,
+                               "missing": missing, "received": received, "resumed": received > 0});
+            upload.ranges = Some(Arc::new(Mutex::new(ranges)));
+            reply
+        } else {
+            // ไฟล์ค้างของโหมดขนาน (มี map) อาจมีช่องว่างกลางไฟล์ ต่อท้ายไม่ได้ · ใหญ่กว่าไฟล์จริง = ของคนละงาน
+            let mut offset = part_len(&path);
+            if offset > p.size || map_path(&path).exists() {
+                remove_partial(&path);
+                offset = 0;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(part_path(&path))?;
+            json!({"transfer_id": id, "offset": offset, "chunk_size": CHUNK_SIZE,
+                   "max_chunk_size": MAX_CHUNK, "resumed": offset > 0})
+        };
+        uploads.insert(id, upload);
+        Ok(reply)
     }
 
-    /// เขียน chunk ต่อท้ายไฟล์ — offset ต้องตรงกับที่ได้รับไปแล้วพอดี (ส่งซ้ำ/ข้ามไม่ได้)
+    /// โหมดเดิม: เขียน chunk ต่อท้ายไฟล์ — offset ต้องตรงกับที่ได้รับไปแล้วพอดี (ส่งซ้ำ/ข้ามไม่ได้)
+    /// โหมดขนาน: เขียน chunk ลงตำแหน่งของมัน มาไม่เรียงและส่งซ้ำได้
     pub async fn put_chunk(&self, id: &str, offset: u64, data: Vec<u8>) -> Res<Value> {
-        let path = {
+        let (path, ranges) = {
             let mut map = self.uploads.lock().unwrap();
             let up = map.get_mut(id).ok_or_else(|| unknown(id))?;
             up.touched = Instant::now();
             if offset + data.len() as u64 > up.size {
                 return Err(RpcError::invalid("chunk เกินขนาดไฟล์ที่ประกาศไว้"));
             }
-            up.path.clone()
+            (up.path.clone(), up.ranges.clone())
         };
+        if let Some(ranges) = ranges {
+            return tokio::task::spawn_blocking(move || put_range(&path, &ranges, offset, &data)).await?;
+        }
         tokio::task::spawn_blocking(move || -> Res<Value> {
             let have = part_len(&path);
             if have != offset {
@@ -184,14 +368,21 @@ impl Transfers {
     }
 
     async fn finish(&self, id: String) -> Res<Value> {
-        let (path, size, expected) = {
+        let (path, size, expected, ranges) = {
             let map = self.uploads.lock().unwrap();
             let up = map.get(&id).ok_or_else(|| unknown(&id))?;
-            (up.path.clone(), up.size, up.sha256.clone())
+            (up.path.clone(), up.size, up.sha256.clone(), up.ranges.clone())
         };
         // (transfer นี้จบแล้วหรือยัง, ผลลัพธ์) — ยังไม่ครบ = ให้ส่งต่อด้วย id เดิมได้
         let (finished, result) = tokio::task::spawn_blocking(move || -> (bool, Res<Value>) {
             let part = part_path(&path);
+            if let Some(ranges) = &ranges {
+                let ranges = ranges.lock().unwrap();
+                if !ranges.complete() {
+                    let msg = format!("ยังไม่ครบ: ได้ {} จาก {size} ไบต์", ranges.received_bytes());
+                    return (false, Err(RpcError::new(CONFLICT, msg)));
+                }
+            }
             let have = part_len(&path);
             if have != size {
                 return (
@@ -205,12 +396,15 @@ impl Transfers {
             };
             if actual != expected {
                 // ไฟล์ที่ checksum ผิดห้ามอยู่ให้ resume ต่อ ไม่งั้นจะผิดซ้ำทุกครั้ง
-                let _ = std::fs::remove_file(&part);
+                remove_partial(&path);
                 let msg = format!("checksum ไม่ตรง (ได้ {actual}) — ลบไฟล์ค้างแล้ว ให้ transfer.begin ใหม่แล้วส่งทั้งไฟล์");
                 return (true, Err(RpcError::new(CONFLICT, msg)));
             }
             match std::fs::rename(&part, &path) {
-                Ok(()) => (true, Ok(json!({"path": path, "size": size, "sha256": actual}))),
+                Ok(()) => {
+                    let _ = std::fs::remove_file(map_path(&path));
+                    (true, Ok(json!({"path": path, "size": size, "sha256": actual})))
+                }
                 Err(e) => (false, Err(e.into())),
             }
         })
@@ -223,9 +417,47 @@ impl Transfers {
 
     fn abort(&self, id: &str) -> Res<Value> {
         let up = self.uploads.lock().unwrap().remove(id).ok_or_else(|| unknown(id))?;
-        let _ = std::fs::remove_file(part_path(&up.path));
+        remove_partial(&up.path);
         Ok(json!({"aborted": true}))
     }
+}
+
+/// chunk ของโหมดขนาน: เริ่มที่ขอบ UNIT และยาวเป็นผลคูณของ UNIT (ยกเว้น chunk ที่จบท้ายไฟล์)
+/// เขียนข้อมูลก่อนแล้วค่อยจดลง map — ดับกลางทางแล้วแค่ต้องส่ง chunk นั้นซ้ำ map ไม่มีวันอ้างว่าได้ช่วงที่ยังไม่ได้เขียน
+fn put_range(path: &Path, ranges: &Mutex<Ranges>, offset: u64, data: &[u8]) -> Res<Value> {
+    let (first, last) = {
+        let ranges = ranges.lock().unwrap();
+        let end = offset + data.len() as u64;
+        let whole_units = (data.len() as u64).is_multiple_of(ranges.unit) || end == ranges.size;
+        if data.is_empty() || !offset.is_multiple_of(ranges.unit) || !whole_units {
+            let msg = format!(
+                "โหมดขนาน: chunk ต้องเริ่มที่ขอบ {0} ไบต์และยาวเป็นผลคูณของ {0} ไบต์",
+                ranges.unit
+            );
+            return Err(RpcError::invalid(msg));
+        }
+        (offset / ranges.unit, end.div_ceil(ranges.unit))
+    };
+    let file = std::fs::OpenOptions::new().write(true).open(part_path(path))?;
+    write_at(&file, data, offset)?;
+    let mut ranges = ranges.lock().unwrap();
+    (first..last).for_each(|i| ranges.mark(i));
+    ranges.save(path)?;
+    Ok(json!({"offset": offset + data.len() as u64, "received": ranges.received_bytes()}))
+}
+
+/// ปฏิเสธตั้งแต่ begin ถ้าดิสก์ปลายทางไม่พอ — ไม่งั้นจะรู้ตอนส่งไปแล้วหลาย GB
+/// นับส่วนที่ได้แล้วใน `.synapta-part` ว่าไม่ต้องใช้พื้นที่เพิ่ม
+fn check_free_space(path: &Path, size: u64) -> Res<()> {
+    let Some(free) = path.parent().and_then(transfer_plan::free_space) else {
+        return Ok(());
+    };
+    let need = size.saturating_sub(part_len(path));
+    if need > free {
+        let msg = format!("พื้นที่ดิสก์ปลายทางไม่พอ: ต้องใช้อีก {need} ไบต์ เหลือ {free} ไบต์");
+        return Err(RpcError::new(CONFLICT, msg));
+    }
+    Ok(())
 }
 
 /// กันสองงานเขียน `<path>.synapta-part` ไฟล์เดียวกันพร้อมกัน (ไฟล์จะปนกันจน checksum ผิดทั้งคู่)

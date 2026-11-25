@@ -12,12 +12,13 @@ use crate::{
     rpc::{self, BUSY, CONFLICT, INVALID_PARAMS, METHOD_NOT_FOUND, NOT_AVAILABLE, Request as RpcRequest, RpcError},
     screen,
     tls::ClientIdentity,
+    transfer,
 };
 use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{
-        Path, Query, Request, State,
+        DefaultBodyLimit, Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
@@ -55,7 +56,11 @@ pub fn router(app: App) -> Router {
     let protected = Router::new()
         .route("/api/v1/rpc", post(http_rpc))
         .route("/api/v1/ws", get(ws_upgrade))
-        .route("/api/v1/transfers/{id}", put(put_chunk))
+        // axum ตัด body ที่ 2 MB โดยปริยาย — chunk ของโหมดขนาน (transfer.rs) ใหญ่กว่านั้น
+        .route(
+            "/api/v1/transfers/{id}",
+            put(put_chunk).layer(DefaultBodyLimit::max(transfer::MAX_BODY)),
+        )
         .route("/api/v1/files", get(download))
         .route("/api/v1/screen/stream", get(screen_stream))
         .layer(middleware::from_fn_with_state(app.clone(), require_client));

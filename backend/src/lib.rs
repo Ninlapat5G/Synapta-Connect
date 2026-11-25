@@ -39,6 +39,7 @@ pub mod settings;
 pub mod shortcut;
 pub mod tls;
 pub mod transfer;
+pub mod transfer_plan;
 #[cfg(windows)]
 pub mod tray;
 pub mod update;
