@@ -320,6 +320,12 @@ VPN ที่เพิ่งต่อทีหลังต้อง restart agen
 ข้อจำกัด: VPN แบบ L3 (Tailscale, WireGuard, Radmin) **ไม่ส่งต่อ multicast/broadcast** — ข้าม VPN ต้องรู้ IP ของ VPN ก่อน
 (เจ้าของดูได้จาก console ของ agent หรือ `/api/v1/local/status`) แล้วใช้ probe/Direct IP · ใช้ชนิดเครือข่ายเลือกเส้นทางที่เร็ว ไม่ใช่เกณฑ์ความไว้ใจ (ยืนยันตัวด้วย mTLS เหมือนกันทุกเส้น)
 
+### Synapta Connect Portable
+
+ส่ง UDP probe เดิมไปที่พอร์ต `52403` เพื่อค้นหา Portable โดย `port` ในผลลัพธ์คือพอร์ต TCP ที่ Windows เลือกให้ครั้งนั้น ผลค้นหาและ `GET /api/v1/hello` ระบุ `portable: true` ส่วนผลค้นหาจะแสดง `name` ระหว่างรอจับคู่
+
+หลัง SPAKE2 สำเร็จ แอปฝั่งควบคุมเปิด `wss://…/api/v1/portable/session` ด้วยใบรับรอง mTLS และรอข้อความ `ready` ก่อนเรียก endpoint เดิม ให้คง WebSocket นี้ไว้และตอบ Pong ระหว่างใช้ RPC รับส่งไฟล์ และเปิดเทอร์มินัล การปิด WebSocket จะจบเซสชันและเพิกถอนใบรับรองของฝั่งควบคุมใน Portable
+
 ## 6. หน้าจัดการบนเครื่องปลายทาง (`http://127.0.0.1:52402`, พอร์ตเปลี่ยนด้วย `--local-port`)
 
 สำหรับ UI/tray บนเครื่องนั้น (ปุ่ม "Pairing Mode", ดู OTP, Revoke, "หยุดทันที") — **เป็น HTTP ธรรมดาบน loopback เท่านั้น ไม่เปิดออกเครือข่าย**

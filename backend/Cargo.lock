@@ -4750,6 +4750,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.23.1",
+ "embed-resource",
  "enigo",
  "futures-util",
  "hmac 0.13.0",

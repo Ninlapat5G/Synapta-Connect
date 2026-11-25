@@ -17,7 +17,7 @@ use hyper_util::{
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, ServerConfig, SignatureScheme,
     crypto::{CryptoProvider, WebPkiSupportedAlgorithms, ring},
-    pki_types::{CertificateDer, PrivateKeyDer, UnixTime, pem::PemObject},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime, pem::PemObject},
     server::danger::{ClientCertVerified, ClientCertVerifier},
 };
 use sha2::{Digest, Sha256};
@@ -58,11 +58,26 @@ pub fn fingerprint(public_key: &[u8; 32]) -> String {
 }
 
 impl HostIdentity {
+    pub fn ephemeral() -> anyhow::Result<Self> {
+        let (cert, key) = Self::generate()?;
+        let public_key = ed25519_key(cert.der()).expect("generated Ed25519 certificate");
+        Ok(Self {
+            cert: cert.der().clone(),
+            key: PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+            public_key,
+        })
+    }
+
+    fn generate() -> anyhow::Result<(rcgen::Certificate, rcgen::KeyPair)> {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        let cert = rcgen::CertificateParams::new(vec!["synapta-connect".to_string()])?.self_signed(&key)?;
+        Ok((cert, key))
+    }
+
     pub fn load_or_create(dir: &Path) -> anyhow::Result<HostIdentity> {
         let (cert_file, key_file) = (dir.join("host.crt"), dir.join("host.key"));
         if !(cert_file.exists() && key_file.exists()) {
-            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
-            let cert = rcgen::CertificateParams::new(vec!["synapta-connect".to_string()])?.self_signed(&key)?;
+            let (cert, key) = Self::generate()?;
             std::fs::create_dir_all(dir)?;
             crate::platform::write_private(&key_file, key.serialize_pem().as_bytes())?;
             std::fs::write(&cert_file, cert.pem())?;

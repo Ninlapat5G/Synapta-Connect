@@ -3,11 +3,18 @@ name = "synapta-connect"
 version = "0.3.18"
 edition = "2024"
 
+[[bin]]
+name = "synapta-connect-portable"
+path = "../portable/src/main.rs"
+
 [features]
 desktop = ["dep:tauri", "dep:tauri-build", "tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"
 
 [dependencies]
 anyhow = "1.0.104"

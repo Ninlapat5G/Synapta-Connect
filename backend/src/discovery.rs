@@ -5,7 +5,7 @@
 //! client ส่ง unicast `{"probe":"synapta-connect"}` ไปที่ IP:discovery_port ของเครื่องนี้
 //! (ผ่าน VPN ได้) แล้วได้ beacon ตอบกลับ; ถ้าไม่ได้เลยก็ต่อ IP:port ตรง ๆ (direct fallback)
 //!
-//! beacon บอกแค่ตัวตนพื้นฐาน — ใครบน LAN ก็อ่านได้ จึงไม่มี IP, OS, hostname, ระดับสิทธิ์
+//! ใครบน LAN ก็อ่าน beacon ได้ จึงประกาศแค่ตัวตนพื้นฐานและชื่อที่แสดงตอนจับคู่ Portable
 
 use crate::{app::App, netif};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
@@ -25,13 +25,20 @@ pub struct Discovery {
 }
 
 fn beacon(app: &App) -> Value {
-    json!({
+    let pairing_mode = app.auth.current_otp().is_some();
+    let portable = app.config.mode == crate::config::Mode::Portable;
+    let mut beacon = json!({
         "protocol": "synapta-connect/v1",
         "device_id": app.node_id,
         "host_pubkey_fingerprint": app.host.fingerprint(),
         "port": app.network.state().ports.port,
-        "pairing_mode": app.auth.current_otp().is_some(),
-    })
+        "pairing_mode": pairing_mode,
+        "portable": portable,
+    });
+    if portable && pairing_mode {
+        beacon["name"] = json!(app.config.name);
+    }
+    beacon
 }
 
 /// เริ่มประกาศตัวเอง; ล้มเหลวส่วนไหนก็แค่ log (agent ยังต่อด้วย IP ตรงได้)

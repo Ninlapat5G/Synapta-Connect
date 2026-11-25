@@ -22,6 +22,7 @@ const OTP_TTL_SECS: u64 = 120;
 const MAX_WRONG_GUESSES: u32 = 5;
 const MAX_RECENT_FAILURES: usize = 20;
 const LOCKOUT: Duration = Duration::from_secs(60);
+const PORTABLE_ATTACH_WINDOW: Duration = Duration::from_secs(30);
 /// ข้อความใน kill channel ที่แปลว่า "ตัดทุก connection"
 pub const KILL_ALL: &str = "*";
 
@@ -86,11 +87,17 @@ struct State {
     locked_until: Option<Instant>,
     /// การเดาผิดล่าสุด (ไว้ให้เจ้าของเครื่องดูว่าใครกำลังเดา) — ใหม่สุดอยู่ท้าย
     recent_failures: Vec<GuessFailure>,
+    portable_control: Option<PortableControl>,
+}
+
+enum PortableControl {
+    Waiting { device: String, until: Instant },
+    Connected(String),
 }
 
 pub struct Auth {
     state: Mutex<State>,
-    devices_file: PathBuf,
+    devices_file: Option<PathBuf>,
     /// ส่ง device id ที่ถูก revoke (หรือ KILL_ALL) เพื่อให้ tls.rs ตัด connection ของมัน
     kill: broadcast::Sender<String>,
 }
@@ -117,7 +124,15 @@ impl Auth {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Ok(Auth {
+        Ok(Self::new(Some(devices_file), devices))
+    }
+
+    pub(crate) fn ephemeral() -> Self {
+        Self::new(None, Vec::new())
+    }
+
+    fn new(devices_file: Option<PathBuf>, devices: Vec<Device>) -> Self {
+        Self {
             state: Mutex::new(State {
                 pairing: None,
                 next_generation: 1,
@@ -125,10 +140,11 @@ impl Auth {
                 wrong_guesses: 0,
                 locked_until: None,
                 recent_failures: Vec::new(),
+                portable_control: None,
             }),
             devices_file,
             kill: broadcast::channel(16).0,
-        })
+        }
     }
 
     // ---------- โหมดจับคู่ ----------
@@ -136,6 +152,10 @@ impl Auth {
     /// เปิดโหมดจับคู่ด้วย OTP ใหม่ (ตัวเก่าใช้ไม่ได้ทันที)
     pub fn open_pairing(&self) -> OtpInfo {
         let mut st = self.state.lock().unwrap();
+        Self::issue_otp(&mut st)
+    }
+
+    fn issue_otp(st: &mut State) -> OtpInfo {
         let otp = new_otp();
         let generation = st.next_generation;
         st.next_generation += 1;
@@ -144,6 +164,43 @@ impl Auth {
             generation,
         });
         otp
+    }
+
+    pub(crate) fn portable_otp(&self) -> Option<OtpInfo> {
+        let mut st = self.state.lock().unwrap();
+        if let Some(PortableControl::Waiting { device, until }) = &st.portable_control
+            && *until <= Instant::now()
+        {
+            let device = device.clone();
+            st.portable_control = None;
+            st.devices.remove(&device);
+            let _ = self.kill.send(device);
+        }
+        if st.portable_control.is_some() || st.locked_until.is_some_and(|until| until > Instant::now()) {
+            return None;
+        }
+        if let Some(pairing) = &st.pairing
+            && pairing.otp.expires_at > now_secs()
+        {
+            return Some(pairing.otp.clone());
+        }
+        Some(Self::issue_otp(&mut st))
+    }
+
+    pub(crate) fn attach_portable(&self, device_id: &str) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if matches!(&st.portable_control, Some(PortableControl::Waiting { device, until })
+            if device == device_id && *until > Instant::now())
+        {
+            st.portable_control = Some(PortableControl::Connected(device_id.into()));
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn portable_attached(&self, device_id: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        matches!(&st.portable_control, Some(PortableControl::Connected(device)) if device == device_id)
     }
 
     pub fn close_pairing(&self) {
@@ -220,6 +277,12 @@ impl Auth {
             last_seen: now_secs(),
         };
         st.devices.insert(device.id.clone(), device.clone());
+        if self.devices_file.is_none() {
+            st.portable_control = Some(PortableControl::Waiting {
+                device: device.id.clone(),
+                until: Instant::now() + PORTABLE_ATTACH_WINDOW,
+            });
+        }
         self.save(&st);
         Ok(device)
     }
@@ -249,6 +312,9 @@ impl Auth {
         let mut st = self.state.lock().unwrap();
         let removed = st.devices.remove(device_id).is_some();
         if removed {
+            if self.devices_file.is_none() {
+                st.portable_control = None;
+            }
             self.save(&st);
             let _ = self.kill.send(device_id.to_string());
         }
@@ -277,12 +343,13 @@ impl Auth {
 
     // เขียนไฟล์ชั่วคราวแล้ว rename เพื่อไม่ให้ไฟล์พังถ้าไฟดับกลางทาง
     fn save(&self, st: &State) {
+        let Some(devices_file) = &self.devices_file else { return };
         let devices: Vec<&Device> = st.devices.values().collect();
-        let tmp = self.devices_file.with_extension("json.tmp");
+        let tmp = devices_file.with_extension("json.tmp");
         let result = serde_json::to_vec_pretty(&devices)
             .map_err(std::io::Error::other)
             .and_then(|b| std::fs::write(&tmp, b))
-            .and_then(|_| std::fs::rename(&tmp, &self.devices_file));
+            .and_then(|_| std::fs::rename(&tmp, devices_file));
         if let Err(e) = result {
             // ไม่ทำให้ pair/revoke ล้ม — แต่ต้องรู้ว่ารายการบนดิสก์ไม่ตรงกับในหน่วยความจำ
             tracing::error!("บันทึก paired_devices.json ไม่สำเร็จ: {e}");
@@ -311,6 +378,28 @@ mod tests {
     fn auth() -> Auth {
         let dir = std::env::temp_dir().join(format!("synapta-auth-{}", random_id(4)));
         Auth::load(&dir).unwrap()
+    }
+
+    #[test]
+    fn portable_pairing_is_usable_only_for_one_live_controller() {
+        let auth = Auth::ephemeral();
+        let first = auth.portable_otp().unwrap();
+        let (_, generation) = auth.begin_pairing().unwrap();
+        let device = auth
+            .complete_pairing(generation, &B64URL.encode([5_u8; 32]), "Client")
+            .unwrap();
+        assert!(auth.portable_otp().is_none());
+        assert!(!auth.portable_attached(&device.id));
+        assert!(!auth.attach_portable("another-device"));
+        assert!(auth.attach_portable(&device.id));
+        assert!(auth.portable_attached(&device.id));
+        assert!(!auth.attach_portable(&device.id));
+        assert!(auth.revoke(&device.id));
+        assert!(!auth.is_active(&device.id));
+        assert!(!auth.portable_attached(&device.id));
+        assert!(auth.portable_otp().is_some());
+        assert_ne!(auth.begin_pairing().unwrap().1, generation);
+        assert!(!first.otp.is_empty());
     }
 
     fn key() -> String {

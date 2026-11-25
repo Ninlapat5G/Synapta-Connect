@@ -43,7 +43,7 @@ enum Target {
 }
 
 async fn target(app: &App) -> Res<Target> {
-    if app.config.mode == Mode::Console {
+    if app.config.mode != Mode::Service {
         return Ok(Target::Here);
     }
     let settings = app.settings.get().commands;

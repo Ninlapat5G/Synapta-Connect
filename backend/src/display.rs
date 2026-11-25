@@ -134,7 +134,7 @@ impl Display {
     }
 
     pub async fn call(&self, app: &App, method: &str, params: Value) -> Res<Value> {
-        if self.mode == Mode::Console {
+        if self.mode != Mode::Service {
             return execute(method, params).await;
         }
         if !app.settings.get().screen_input.enabled {

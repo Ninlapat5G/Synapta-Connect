@@ -8,6 +8,7 @@
 use crate::{
     api::{Ctx, WsCtx, dispatch},
     app::App,
+    config::Mode,
     file_access, pairing, pty,
     rpc::{self, BUSY, CONFLICT, INVALID_PARAMS, METHOD_NOT_FOUND, NOT_AVAILABLE, Request as RpcRequest, RpcError},
     screen,
@@ -30,13 +31,18 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::mpsc,
+    task::{JoinHandle, JoinSet},
+    time::Instant,
+};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 /// อุปกรณ์ที่ผ่านด่าน mTLS (id = fingerprint ของ public key) — handler ดึงจาก request extensions
 #[derive(Clone)]
 pub struct Verified(pub String);
+const PORTABLE_SESSION_PATH: &str = "/api/v1/portable/session";
 
 /// code ของ RpcError → HTTP status (ใช้กับ endpoint ที่ไม่ใช่ JSON-RPC)
 impl IntoResponse for RpcError {
@@ -56,6 +62,7 @@ pub fn router(app: App) -> Router {
     let protected = Router::new()
         .route("/api/v1/rpc", post(http_rpc))
         .route("/api/v1/ws", get(ws_upgrade))
+        .route(PORTABLE_SESSION_PATH, get(portable_upgrade))
         // axum ตัด body ที่ 2 MB โดยปริยาย — chunk ของโหมดขนาน (transfer.rs) ใหญ่กว่านั้น
         .route(
             "/api/v1/transfers/{id}",
@@ -92,7 +99,12 @@ async fn require_client(
     mut req: Request,
     next: Next,
 ) -> Response {
-    match device.filter(|d| app.auth.is_active(d)) {
+    match device.filter(|d| {
+        app.auth.is_active(d)
+            && (app.config.mode != Mode::Portable
+                || req.uri().path() == PORTABLE_SESSION_PATH
+                || app.auth.portable_attached(d))
+    }) {
         Some(id) => {
             req.extensions_mut().insert(Verified(id));
             next.run(req).await
@@ -116,6 +128,7 @@ async fn hello(State(app): State<App>) -> Json<Value> {
         "api_version": 1, "port": app.network.state().ports.port,
         "host_pubkey_fingerprint": app.host.fingerprint(),
         "pairing_mode": app.auth.current_otp().is_some(),
+        "portable": app.config.mode == Mode::Portable,
     }))
 }
 
@@ -148,6 +161,68 @@ async fn ws_upgrade(
 ) -> Response {
     ws.max_message_size(1024 * 1024)
         .on_upgrade(move |socket| ws_session(app, device, socket))
+}
+
+async fn portable_upgrade(
+    State(app): State<App>,
+    Extension(Verified(device)): Extension<Verified>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if app.config.mode != Mode::Portable {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    ws.max_message_size(1024)
+        .on_upgrade(move |socket| portable_session(app, device, socket))
+}
+
+struct PortableSession {
+    app: App,
+    device: String,
+}
+
+impl Drop for PortableSession {
+    fn drop(&mut self) {
+        self.app.auth.revoke(&self.device);
+    }
+}
+
+async fn portable_session(app: App, device: String, mut socket: WebSocket) {
+    let kills = app.auth.subscribe_kills();
+    if !app.auth.attach_portable(&device) {
+        return;
+    }
+    let _session = PortableSession {
+        app: app.clone(),
+        device: device.clone(),
+    };
+    let keep_alive = async {
+        if socket.send(Message::Text("ready".into())).await.is_err() {
+            return;
+        }
+        let mut ticks = tokio::time::interval(Duration::from_secs(5));
+        let mut last_pong = Instant::now();
+        loop {
+            tokio::select! {
+                message = socket.recv() => match message {
+                    Some(Ok(Message::Pong(_))) => last_pong = Instant::now(),
+                    Some(Ok(Message::Ping(_))) => continue,
+                    _ => break,
+                },
+                _ = ticks.tick() => {
+                    if last_pong.elapsed() >= Duration::from_secs(15)
+                        || !matches!(tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Ping(Bytes::new()))).await, Ok(Ok(())))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    let device = Some(device);
+    tokio::select! {
+        _ = keep_alive => {},
+        _ = crate::tls::wait_for_kill(&app, &device, kills) => {},
+    }
 }
 
 /// เก็บกวาดเมื่อ connection จบ — รวมกรณีที่ถูกตัดกลางคัน (revoke / kill-all) ซึ่ง future ถูกทิ้งโดยไม่รันโค้ดท้ายฟังก์ชัน
@@ -194,24 +269,32 @@ async fn ws_session(app: App, device: String, socket: WebSocket) {
     let me = Some(device.clone());
     let kill = crate::tls::wait_for_kill(&app, &me, app.auth.subscribe_kills());
     tokio::pin!(kill);
+    let mut requests = JoinSet::new();
     loop {
         let msg = tokio::select! {
             msg = stream.next() => msg,
             _ = &mut kill => break, // revoke / kill-all
+            _ = requests.join_next(), if !requests.is_empty() => continue,
         };
         let Some(Ok(msg)) = msg else { break };
         match msg {
             Message::Text(text) => {
                 // แต่ละ request ทำงานแยก — exec ที่ช้าต้องไม่ขวาง pty.write
+                let portable = app.config.mode == Mode::Portable;
                 let (app, out, ptys, device) = (app.clone(), out.clone(), cleanup.ptys.clone(), device.clone());
-                tokio::spawn(async move {
+                let request = async move {
                     let ctx = Ctx {
                         session_id: device,
                         ws: Some(WsCtx { out: out.clone(), ptys }),
                     };
                     let reply = handle_message(&app, &ctx, text.as_bytes()).await;
                     let _ = out.send(reply.to_string()).await;
-                });
+                };
+                if portable {
+                    requests.spawn(request);
+                } else {
+                    tokio::spawn(request);
+                }
             }
             Message::Close(_) => break,
             _ => {} // ping/pong/binary: ไม่มีงานให้ทำ

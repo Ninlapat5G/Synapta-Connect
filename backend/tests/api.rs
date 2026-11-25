@@ -20,7 +20,7 @@ use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use synapta_connect::{
     app::{App, AppState},
-    config::Config,
+    config::{Config, Mode},
     hex::{random_id, to_hex},
     http, local, tls,
 };
@@ -129,11 +129,15 @@ fn client_config(pin: [u8; 32], identity: Option<&Identity25519>) -> ClientConfi
 }
 
 async fn start_with(file_roots: Vec<PathBuf>) -> Agent {
+    start_in(Mode::Console, file_roots).await
+}
+
+async fn start_in(mode: Mode, file_roots: Vec<PathBuf>) -> Agent {
     synapta_connect::platform::init(); // เหมือน main: ต้องมีก่อนจับภาพ/จำลองเมาส์
     let _ = ring::default_provider().install_default(); // reqwest (no-provider) ต้องมี provider เริ่มต้น แม้ client ธรรมดา
     let dir = std::env::temp_dir().join(format!("synapta-test-{}", random_id(4)));
     let config = Config {
-        mode: synapta_connect::config::Mode::Console,
+        mode,
         port: 0,
         discovery_port: 0,
         local_port: 0,
@@ -177,6 +181,71 @@ async fn start_paired() -> Agent {
     let otp = a.app.auth.open_pairing().otp;
     a.pair(&otp, a.app.host.public_key).await.unwrap();
     a
+}
+
+#[tokio::test]
+async fn portable_pairing_allows_operations_only_while_the_controller_is_connected() {
+    let agent = start_in(Mode::Portable, vec![]).await;
+    let rpc_status = || async {
+        agent
+            .authed()
+            .post(agent.url("/api/v1/rpc"))
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "rpc.ping", "params": {}}))
+            .send()
+            .await
+    };
+    let otp = agent.app.auth.open_pairing().otp;
+    let pairing = agent.pair(&otp, agent.app.host.public_key).await.unwrap();
+    assert_eq!(rpc_status().await.unwrap().status(), 401);
+
+    let mut controller = agent.ws_at("/api/v1/portable/session").await;
+    assert_eq!(controller.next().await.unwrap().unwrap(), Message::Text("ready".into()));
+    assert_eq!(
+        rpc_status().await.unwrap().json::<Value>().await.unwrap()["result"]["pong"],
+        true
+    );
+    let exec = agent.call("exec.run", json!({"command": "echo portable"})).await;
+    assert_eq!(exec["stdout"].as_str().unwrap().trim(), "portable");
+
+    let path = agent.dir.join("received.txt");
+    let bytes = b"portable file";
+    let sha = to_hex(&Sha256::digest(bytes));
+    let transfer = agent
+        .call(
+            "transfer.begin",
+            json!({"path": path, "size": bytes.len(), "sha256": sha}),
+        )
+        .await;
+    let transfer_id = transfer["transfer_id"].as_str().unwrap();
+    let client = agent.authed();
+    let uploaded = client
+        .put(agent.url(&format!("/api/v1/transfers/{transfer_id}?offset=0")))
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), 200);
+    agent.call("transfer.finish", json!({"transfer_id": transfer_id})).await;
+    let mut url = reqwest::Url::parse(&agent.url("/api/v1/files")).unwrap();
+    url.query_pairs_mut().append_pair("path", path.to_str().unwrap());
+    let downloaded = client.get(url).send().await.unwrap();
+    assert_eq!(downloaded.bytes().await.unwrap().as_ref(), bytes);
+
+    assert!(!agent.dir.join("host.key").exists());
+    assert!(!agent.dir.join("paired_devices.json").exists());
+
+    controller.close(None).await.unwrap();
+    let device = pairing["device_id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while agent.app.auth.is_active(device) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if let Ok(response) = rpc_status().await {
+        assert_eq!(response.status(), 401);
+    }
 }
 
 fn mac(key: &[u8], label: &[u8], host: &[u8], client: &[u8]) -> Hmac<Sha256> {
@@ -262,6 +331,13 @@ impl Agent {
     }
 
     async fn ws(&self) -> tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+        self.ws_at("/api/v1/ws").await
+    }
+
+    async fn ws_at(
+        &self,
+        path: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
         let tcp = tokio::net::TcpStream::connect(("127.0.0.1", self.port)).await.unwrap();
         let connector =
             tokio_rustls::TlsConnector::from(Arc::new(client_config(self.app.host.public_key, Some(&self.me))));
@@ -269,7 +345,7 @@ impl Agent {
             .connect(ServerName::try_from("synapta-connect").unwrap(), tcp)
             .await
             .unwrap();
-        tokio_tungstenite::client_async(format!("wss://127.0.0.1:{}/api/v1/ws", self.port), tls)
+        tokio_tungstenite::client_async(format!("wss://127.0.0.1:{}{path}", self.port), tls)
             .await
             .unwrap()
             .0

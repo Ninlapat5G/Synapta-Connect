@@ -1,4 +1,10 @@
-use crate::{app::App, config::Ports, discovery, local, panel_https, settings::NetworkSettings, tls};
+use crate::{
+    app::App,
+    config::{Mode, Ports},
+    discovery, local, panel_https,
+    settings::NetworkSettings,
+    tls,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     net::Ipv4Addr,
@@ -209,19 +215,28 @@ impl Listeners {
             discovery_port,
         } = app.network.state().ports;
         let agent_socket = bind_tcp(Ipv4Addr::UNSPECIFIED, port).await?;
-        let panel_socket = match bind_panel(app, local_port).await {
+        let portable = app.config.mode == Mode::Portable;
+        let panel_socket = if portable {
+            None
+        } else {
+            match bind_panel(app, local_port).await {
+                Ok(socket) => Some(socket),
+                Err(error) if app.config.mode == crate::config::Mode::Service => {
+                    tracing::warn!(port = local_port, %error, "Web Panel unavailable at startup");
+                    app.network.set_panel_health(false, 0, Some(error.to_string()));
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let udp = match bind_discovery(discovery_port).await {
             Ok(socket) => Some(socket),
-            Err(error) if app.config.mode == crate::config::Mode::Service => {
-                tracing::warn!(port = local_port, %error, "Web Panel unavailable at startup");
-                app.network.set_panel_health(false, 0, Some(error.to_string()));
+            Err(error) if portable => anyhow::bail!("เปิดพอร์ตค้นหา UDP {discovery_port} ไม่ได้: {error}"),
+            Err(error) => {
+                tracing::warn!("เปิด UDP {discovery_port} ไม่ได้: {error}");
                 None
             }
-            Err(error) => return Err(error.into()),
         };
-        let udp = bind_discovery(discovery_port)
-            .await
-            .inspect_err(|e| tracing::warn!("เปิด UDP {discovery_port} ไม่ได้: {e}"))
-            .ok();
         let agent_tls = tls::server_config(app)?;
         let local_port = match &panel_socket {
             Some(socket) => socket.local_addr()?.port(),
@@ -236,7 +251,9 @@ impl Listeners {
             }
         }
         app.network.panel_port.send_replace(local_port);
-        publish_panel_port(app, local_port)?;
+        if !portable {
+            publish_panel_port(app, local_port)?;
+        }
         if panel_socket.is_some() {
             app.network.set_panel_health(true, 0, None);
         }
@@ -255,6 +272,10 @@ impl Listeners {
     }
 
     pub async fn supervise(mut self, app: App) -> anyhow::Result<()> {
+        if app.config.mode == Mode::Portable {
+            let result = (&mut self.agent.0).await;
+            anyhow::bail!("Agent listener exited: {result:?}");
+        }
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let client = reqwest::Client::builder()
@@ -440,6 +461,32 @@ fn publish_panel_port(app: &App, port: u16) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn portable_publishes_a_dynamic_agent_port_without_starting_the_panel() {
+        let data_dir = std::env::temp_dir().join(format!("synapta-portable-test-{}", crate::hex::random_id(8)));
+        let config = crate::config::Config {
+            mode: Mode::Portable,
+            data_dir: data_dir.clone(),
+            port: 0,
+            discovery_port: 0,
+            ..crate::config::Config::default()
+        };
+        let app = crate::app::AppState::new(config).unwrap();
+        let listeners = Listeners::start(&app).await.unwrap();
+        let ports = app.network.state().ports;
+        assert_ne!(ports.port, 0);
+        assert_ne!(ports.discovery_port, 0);
+        assert!(listeners.panel.is_none());
+        assert!(!data_dir.join("panel-port").exists());
+        let supervisor = tokio::spawn(listeners.supervise(app.clone()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!app.network.panel_health().ready);
+        supervisor.abort();
+        let _ = supervisor.await;
+        drop(app);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 
     #[tokio::test]
     async fn service_keeps_its_agent_port_when_the_panel_port_is_occupied() {

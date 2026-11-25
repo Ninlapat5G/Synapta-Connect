@@ -28,6 +28,9 @@ pub mod pairing;
 pub mod panel;
 pub mod panel_https;
 pub mod platform;
+#[cfg(windows)]
+#[path = "../../portable/src/mod.rs"]
+pub mod portable;
 pub mod profile;
 pub mod proof;
 pub mod pty;
@@ -67,6 +70,7 @@ pub async fn run_until(config: Config, shutdown: impl Future<Output = ()>) -> an
 
     match app.config.mode {
         Mode::Console => announce_console(&app),
+        Mode::Portable => anyhow::bail!("launch the Portable desktop application"),
         Mode::Service => {
             // service ไม่เปิดโหมดจับคู่เอง (เจ้าของสั่งที่ panel เท่านั้น) และไม่มีใครเห็น console
             tracing::info!(version = env!("CARGO_PKG_VERSION"), host_key = %app.host.fingerprint(), "service เริ่มทำงาน");

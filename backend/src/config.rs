@@ -43,7 +43,10 @@ pub fn panel_port(data_dir: &Path) -> Option<u16> {
 pub enum Mode {
     Console,
     Service,
+    Portable,
 }
+
+pub const PORTABLE_DISCOVERY_PORT: u16 = 52403;
 
 #[derive(Clone, Debug)]
 pub struct Config {

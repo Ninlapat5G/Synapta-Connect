@@ -2,6 +2,16 @@
 //! (ให้ CI/ผู้เผยแพร่ใส่กุญแจตอน build โดยไม่ต้องแก้ไฟล์ใน repo; รุ่นทดสอบใช้กุญแจทดสอบได้โดยไม่ปนกับของจริง)
 
 fn main() {
+    #[cfg(windows)]
+    {
+        for file in ["portable.rc", "portable.manifest", "synapta-connect-portable.ico"] {
+            println!("cargo:rerun-if-changed=../portable/assets/{file}");
+        }
+        embed_resource::compile_for("../portable/assets/portable.rc", ["synapta-connect-portable"], embed_resource::NONE)
+            .manifest_required()
+            .expect("build Portable application resources");
+    }
+
     #[cfg(feature = "desktop")]
     tauri_build::try_build(
         tauri_build::Attributes::new()

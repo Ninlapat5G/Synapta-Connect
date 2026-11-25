@@ -48,7 +48,7 @@ fn production_update_env(mode: Mode) -> UpdateEnv {
     #[cfg(windows)]
     let trigger: Arc<dyn crate::update::Trigger> = match mode {
         Mode::Service => Arc::new(crate::winsvc::ServiceTrigger),
-        Mode::Console => Arc::new(NoInstaller),
+        Mode::Console | Mode::Portable => Arc::new(NoInstaller),
     };
     #[cfg(not(windows))]
     let trigger: Arc<dyn crate::update::Trigger> = Arc::new(NoInstaller);
@@ -77,13 +77,16 @@ impl AppState {
                     .map_err(|e| anyhow::anyhow!("--file-root {}: {e}", r.display()))
             })
             .collect::<Result<_, _>>()?;
+        let portable = config.mode == Mode::Portable;
         let local_token = crate::hex::random_id(32);
         std::fs::create_dir_all(&config.data_dir)?;
         let settings = Arc::new(SettingsStore::load(&config.data_dir));
         let network = Network::load(&config.data_dir, settings.get().network, config.ports())?;
         // เจ้าของเครื่อง (บัญชีที่ติดตั้งระบุไว้) ต้องอ่าน token ได้เพื่อเปิด panel — คนอื่นอ่านไม่ได้
         let readers: Vec<String> = settings.get().owner.into_iter().collect();
-        crate::platform::write_private_for(&config.data_dir.join("local_token"), local_token.as_bytes(), &readers)?;
+        if !portable {
+            crate::platform::write_private_for(&config.data_dir.join("local_token"), local_token.as_bytes(), &readers)?;
+        }
         let web_updates = Arc::new(WebUpdater::new(&config.data_dir, settings.clone(), update_env.pubkey));
         let updates = Arc::new(UpdateManager::new(
             update_env,
@@ -99,9 +102,21 @@ impl AppState {
             settings,
             updates,
             local_token,
-            node_id: load_or_create_node_id(&config.data_dir)?,
-            host: HostIdentity::load_or_create(&config.data_dir)?,
-            auth: Auth::load(&config.data_dir)?,
+            node_id: if portable {
+                format!("sc-node-{}", crate::hex::random_id(6))
+            } else {
+                load_or_create_node_id(&config.data_dir)?
+            },
+            host: if portable {
+                HostIdentity::ephemeral()?
+            } else {
+                HostIdentity::load_or_create(&config.data_dir)?
+            },
+            auth: if portable {
+                Auth::ephemeral()
+            } else {
+                Auth::load(&config.data_dir)?
+            },
             handshakes: Handshakes::default(),
             transfers: Transfers::new(config.file_roots.clone()),
             screen_streams: Arc::new(Semaphore::new(MAX_SCREEN_STREAMS)),
