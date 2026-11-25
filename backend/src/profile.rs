@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use sysinfo::{
@@ -57,7 +60,7 @@ fn collect() -> Res<Value> {
     std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
     sys.refresh_cpu_usage();
 
-    let disks = disks_with_timeout();
+    let (disks, disks_complete) = disks_or_last_known();
 
     Ok(json!({
         "hostname": System::host_name().ok(),
@@ -68,8 +71,8 @@ fn collect() -> Res<Value> {
                 "logical_cores": sys.cpus().len(),
                 "usage_percent": sys.global_cpu_usage()},
         "memory": {"total_bytes": sys.total_memory(), "available_bytes": sys.available_memory()},
-        "disks_complete": disks.is_some(),
-        "disks": disks.unwrap_or_default(),
+        "disks_complete": disks_complete,
+        "disks": disks,
         "network": netif::list(),
         "privilege": privilege()?,
         "agent": {"version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(),
@@ -81,6 +84,17 @@ fn collect() -> Res<Value> {
 const DISK_TIMEOUT: Duration = Duration::from_secs(3);
 /// A disk probe thread is still running (possibly stuck forever on a hung drive).
 static DISK_PROBE_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Last disk list a probe finished, even one that finished after its caller stopped waiting.
+static LAST_DISKS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+
+/// Fresh disk list and true, or the last known one and false when the probe ran out of time.
+/// A slow drive (a sleeping HDD, a network drive) would otherwise make every disk vanish from the overview.
+fn disks_or_last_known() -> (Vec<Value>, bool) {
+    match disks_with_timeout() {
+        Some(disks) => (disks, true),
+        None => (LAST_DISKS.lock().map(|last| last.clone()).unwrap_or_default(), false),
+    }
+}
 
 /// Disk list, or None when it did not finish in time.
 ///
@@ -95,6 +109,9 @@ fn disks_with_timeout() -> Option<Vec<Value>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let disks = list_disks();
+        if let (Some(fresh), Ok(mut last)) = (&disks, LAST_DISKS.lock()) {
+            *last = fresh.clone();
+        }
         DISK_PROBE_RUNNING.store(false, Ordering::Release);
         let _ = sender.send(disks);
     });
