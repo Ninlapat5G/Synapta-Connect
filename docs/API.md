@@ -6,6 +6,8 @@ Agent คือโปรแกรม Rust ตัวเดียว (`synapta-con
 โค้ดอ้างอิง: `backend/src/api.rs` (ตาราง method ทั้งหมด), `backend/src/pairing.rs` (SPAKE2), `backend/tests/api.rs`
 (**ตัวอย่าง client ที่ทำงานจริงครบทุกขั้น** — สร้างกุญแจ/ใบรับรอง, ปักหมุด host key, SPAKE2, mTLS, WSS)
 
+การตั้งค่าโมดูลและ JSON-RPC สำหรับอัปเดตเฟิร์มแวร์ SDP อยู่ใน [SDP OTA](SDP_OTA.md)
+
 ## 1. ภาพรวม
 
 ```

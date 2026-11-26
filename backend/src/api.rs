@@ -53,6 +53,9 @@ pub async fn dispatch(app: &App, ctx: &Ctx, method: &str, params: Value) -> Res<
         "file.open_path" => browse::open_path(parse(params)?, &app.config.file_roots).await,
 
         "update.status" | "update.check" | "update.install" => crate::update::remote::rpc(app, method, params).await,
+        "sdp.ota.module" | "sdp.ota.status" | "sdp.ota.upload" => {
+            app.sdp_ota.rpc(app, &ctx.session_id, method, params).await
+        }
 
         "transfer.begin" | "transfer.finish" | "transfer.abort" | "transfer.stat" => {
             app.transfers.rpc(method, params).await

@@ -4,6 +4,14 @@
 
 ## 1. สถานะ
 
+### รอบ SDP OTA (2026-11-27) — อัปเดตเฟิร์มแวร์ ESP32 ผ่าน Connect (ยังไม่ออกรุ่น)
+
+- RPC `sdp.ota.module` / `sdp.ota.status` / `sdp.ota.upload` (`src/sdp_ota.rs`) เรียก CLI `tools/sdp-ota/sdp_ota.py` จาก SDP checkout
+  ที่เจ้าของตั้งในไฟล์ `SYNAPTA_SDP_OTA_CONFIG` — client ส่งได้แค่ ID ส่วน path ของ python/สคริปต์/กุญแจ/ไฟล์เฟิร์มแวร์มาจาก config ฝั่งเครื่องเท่านั้น
+- เขียนเฟิร์มแวร์ได้เฉพาะ pairing ที่อยู่ใน `writeClients` และ `allowFirmwareWrite: true` · ใช้ได้ทั้งรุ่นติดตั้งและ Portable · คู่มือ `docs/SDP_OTA.md`
+- **ยังไม่ได้ทดสอบ:** กับบอร์ดจริงผ่าน Connect (ทดสอบด้วย CLI จำลองเท่านั้น) และยังไม่ได้ออกรุ่นให้เครื่องที่ติดตั้งไว้
+- โหมดพกพา (Portable) ทำแล้วใน commit `a52bbc1` — บรีฟและสถานะอยู่ใน `docs/PORTABLE_MODE.md`
+
 ### รอบ v0.3.7 · panel 0.1.4 (2026-11-22) — เปิด panel ได้จริงบน Server 2016 + สั่งอัปเดตจากระยะไกล
 
 - **บั๊กจริงบน app01:** คำสั่ง `panel` บอกว่าเปิดแล้วแต่เบราว์เซอร์ไม่ขึ้น — UserChoice ของ http เป็น Edge รุ่นเก่า (AppX) ที่ไม่มีบน Server

@@ -39,6 +39,7 @@ pub struct AppState {
     pub panel: PanelSessions,
     pub network: Network,
     pub web_updates: Arc<WebUpdater>,
+    pub(crate) sdp_ota: crate::sdp_ota::Ota,
 }
 
 pub type App = Arc<AppState>;
@@ -120,6 +121,7 @@ impl AppState {
             handshakes: Handshakes::default(),
             transfers: Transfers::new(config.file_roots.clone()),
             screen_streams: Arc::new(Semaphore::new(MAX_SCREEN_STREAMS)),
+            sdp_ota: crate::sdp_ota::Ota::new(),
             config,
         }))
     }

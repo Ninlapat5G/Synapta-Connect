@@ -33,4 +33,6 @@
 
 โค้ดของตัว Portable อยู่ใน `portable/src/` และทรัพยากรของ Windows อยู่ใน `portable/assets/` โดยใช้ Rust backend ร่วมกับ Connect
 
+Portable ใช้โมดูล SDP OTA ร่วมกับ Connect รุ่นติดตั้ง ตั้งค่าโมดูลบนเครื่องอัปโหลดได้ตาม [คู่มือ SDP OTA](SDP_OTA.md) แล้วจับคู่ Portable จากแอปฝั่งควบคุมตามปกติ
+
 บน Windows ให้ build Web Panel ตามขั้นตอนของ Connect ก่อน แล้วรัน `cargo build --release --locked --bin synapta-connect-portable` จากโฟลเดอร์ `backend` ไฟล์ที่ได้คือ `backend/target/release/synapta-connect-portable.exe` เก็บไฟล์พร้อมรันไว้ใน `portable/bin/` ได้ โฟลเดอร์นี้ใช้เก็บไฟล์ build บนเครื่องและอยู่ใน `.gitignore`

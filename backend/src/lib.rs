@@ -37,6 +37,7 @@ pub mod pty;
 pub mod rpc;
 pub mod run_as;
 pub mod screen;
+mod sdp_ota;
 pub mod settings;
 #[cfg(windows)]
 pub mod shortcut;
