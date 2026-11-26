@@ -11,7 +11,8 @@
 - เขียนเฟิร์มแวร์ได้เฉพาะ pairing ที่อยู่ใน `writeClients` และ `allowFirmwareWrite: true` · ใช้ได้ทั้งรุ่นติดตั้งและ Portable · คู่มือ `docs/SDP_OTA.md`
 - ทดสอบกับ ESP32 จริงแล้ว: `cargo test --test api sdp_ota_live -- --ignored --nocapture` (ต้องตั้ง `SYNAPTA_SDP_OTA_LIVE_CONFIG`
   และ `SYNAPTA_SDP_OTA_LIVE_TARGET`) อัปเดต `ota-bench-wifi-110` → `111` ผ่าน Wi-Fi ได้ verified ใน 19 วินาที
-- **ยังไม่ได้ทดสอบ:** อัปเดตอัตโนมัติจาก v0.3.18 → v0.3.19 บนเครื่องที่ติดตั้งจริง และ Portable ตัวที่ build บน MSI บน Server 2016
+- อัปเดตอัตโนมัติ v0.3.18 → v0.3.19 บน app01 ผ่าน (2026-11-27) · Portable ของรุ่นนี้ build บน app01 (`C:\Nin\SynaptaConnect-release\v0.3.19`)
+- **ยังไม่ได้ทดสอบ:** เปิด Portable v0.3.19 บนเดสก์ท็อปจริง (ยังไม่มีเซสชันผู้ใช้บน app01)
 - โหมดพกพา (Portable) ทำแล้วใน commit `a52bbc1` — บรีฟและสถานะอยู่ใน `docs/PORTABLE_MODE.md`
 
 ### รอบ v0.3.7 · panel 0.1.4 (2026-11-22) — เปิด panel ได้จริงบน Server 2016 + สั่งอัปเดตจากระยะไกล
