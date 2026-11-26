@@ -5,7 +5,9 @@ param(
     [string]$OutputPath = '',
     [string]$SigningKey = '',
     [string]$PublicKey = '',
-    [string]$ReleaseTool = ''
+    [string]$ReleaseTool = '',
+    # Portable exe built elsewhere (e.g. on app01); skips the local Portable build
+    [string]$PortableExe = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,7 @@ if ($PublicKey -and ($PublicKey -notmatch '^[0-9a-fA-F]{64}$' -or $PublicKey -eq
     throw 'Invalid Ed25519 public key.'
 }
 if ($ReleaseTool) { $ReleaseTool = (Resolve-Path -LiteralPath $ReleaseTool).Path }
+if ($PortableExe) { $PortableExe = (Resolve-Path -LiteralPath $PortableExe).Path }
 
 function Invoke-Checked {
     param([string]$Executable, [string[]]$Arguments)
@@ -71,7 +74,10 @@ try {
         if ($BuildBackend) {
             if ((& rustc -vV | Out-String) -notmatch 'host: x86_64-pc-windows-msvc') { throw 'Backend release requires the Windows x64 MSVC Rust toolchain.' }
             Invoke-Checked 'npm.cmd' @('--prefix', $Frontend, 'run', 'build:desktop')
-            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--features', 'desktop')
+            Invoke-Checked 'cargo' @('build', '--release', '--locked', '--features', 'desktop', '--bin', 'synapta-connect', '--bin', 'synapta-release')
+            # Portable builds without "desktop": tauri-build links its icon resource into every binary,
+            # which collides with Portable's own icon (CVT1100 duplicate resource) at link time.
+            if (!$PortableExe) { Invoke-Checked 'cargo' @('build', '--release', '--locked', '--bin', 'synapta-connect-portable') }
         } elseif ($SigningKey -and !$ReleaseTool) {
             Invoke-Checked 'cargo' @('build', '--release', '--locked', '--bin', 'synapta-release')
         }
@@ -91,6 +97,8 @@ try {
             Copy-Item -LiteralPath $exe -Destination (Join-Path $destination "SynaptaConnect-v$BackendVersion.exe") -Force
         }
         Copy-Notices $destination
+        if (!$PortableExe) { $PortableExe = Join-Path $Target 'synapta-connect-portable.exe' }
+        Copy-Item -LiteralPath $PortableExe -Destination (Join-Path $destination "SynaptaConnectPortable-v$BackendVersion.exe") -Force
         # Windowed installer for first-time installs; updates keep using the bare agent exe above
         $installer = Join-Path $destination "SynaptaConnectSetup-v$BackendVersion.exe"
         & (Join-Path $ProjectRoot 'installer/windows/build-installer.ps1') -Agent $exe -Notices (Join-Path $destination 'THIRD_PARTY_NOTICES.txt') -Version $BackendVersion -Output $installer | Out-Null

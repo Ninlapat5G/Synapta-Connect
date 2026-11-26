@@ -1185,3 +1185,43 @@ async fn idle_pre_auth_connections_cannot_lock_out_paired_devices() {
     assert_eq!(hello.status(), 200);
     drop(held);
 }
+
+/// OTA กับบอร์ด SDP จริงผ่าน mTLS เต็มเส้นทาง — config ของเครื่องอัปโหลดต้องมีบอร์ดอยู่แล้ว
+/// และไฟล์ `<artifactRoot>/<projectId>/<buildId>/sdp_ota.bin` ต้องเป็นบิลด์ใหม่ที่บอร์ดยังไม่ได้รัน
+/// เทสต์ตั้ง env SYNAPTA_SDP_OTA_CONFIG ของทั้งโปรเซส จึงต้องรันเดี่ยวด้วยชื่อเทสต์เท่านั้น
+#[tokio::test]
+#[ignore = "ต้องมีบอร์ด SDP จริง — ตั้ง SYNAPTA_SDP_OTA_LIVE_CONFIG และ SYNAPTA_SDP_OTA_LIVE_TARGET=<deviceId>/<projectId>/<buildId> แล้วรัน: cargo test --test api sdp_ota_live -- --ignored --nocapture"]
+async fn sdp_ota_live_board_upload_is_verified_after_reboot() {
+    let base = std::fs::read(std::env::var("SYNAPTA_SDP_OTA_LIVE_CONFIG").unwrap()).unwrap();
+    let target = std::env::var("SYNAPTA_SDP_OTA_LIVE_TARGET").unwrap();
+    let [device, project, build] = target.split('/').collect::<Vec<_>>()[..] else {
+        panic!("SYNAPTA_SDP_OTA_LIVE_TARGET ต้องเป็น <deviceId>/<projectId>/<buildId>");
+    };
+    let config = std::env::temp_dir().join(format!("synapta-ota-live-{}.json", random_id(4)));
+    // SAFETY: เทสต์นี้รันเดี่ยว (ignored + กรองชื่อ) ไม่มีเธรดอื่นอ่าน env พร้อมกัน
+    unsafe { std::env::set_var("SYNAPTA_SDP_OTA_CONFIG", &config) };
+    let a = start_paired().await;
+
+    // config ถูกอ่านใหม่ทุก RPC: เปิดสิทธิ์เขียนให้ pairing ของเทสต์นี้หลังจับคู่แล้ว
+    let me = a.call("session.list", json!({})).await["current"].clone();
+    let mut cfg: Value = serde_json::from_slice(&base).unwrap();
+    cfg["allowFirmwareWrite"] = json!(true);
+    cfg["writeClients"] = json!([me]);
+    std::fs::write(&config, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let module = a.call("sdp.ota.module", json!({})).await;
+    assert_eq!((&module["status"], &module["firmwareWrite"]), (&json!("ready"), &json!(true)), "{module}");
+    let before = a.call("sdp.ota.status", json!({"deviceId": device})).await;
+    println!("before: {before}");
+    assert_ne!(before["runningBuildId"], build, "บอร์ดรันบิลด์นี้อยู่แล้ว");
+
+    let reply = a
+        .call("sdp.ota.upload", json!({"deviceId": device, "projectId": project, "buildId": build}))
+        .await;
+    println!("upload: {}", reply["result"]);
+    assert_eq!(reply["result"]["outcome"], "verified", "{reply}");
+    let after = a.call("sdp.ota.status", json!({"deviceId": device})).await;
+    println!("after: {after}");
+    assert_eq!((&after["runningBuildId"], &after["bootState"]), (&json!(build), &json!("confirmed")));
+    std::fs::remove_file(config).ok();
+}

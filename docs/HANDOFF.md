@@ -4,12 +4,14 @@
 
 ## 1. สถานะ
 
-### รอบ SDP OTA (2026-11-27) — อัปเดตเฟิร์มแวร์ ESP32 ผ่าน Connect (ยังไม่ออกรุ่น)
+### รอบ v0.3.19 · SDP OTA (2026-11-27) — อัปเดตเฟิร์มแวร์ ESP32 ผ่าน Connect
 
 - RPC `sdp.ota.module` / `sdp.ota.status` / `sdp.ota.upload` (`src/sdp_ota.rs`) เรียก CLI `tools/sdp-ota/sdp_ota.py` จาก SDP checkout
   ที่เจ้าของตั้งในไฟล์ `SYNAPTA_SDP_OTA_CONFIG` — client ส่งได้แค่ ID ส่วน path ของ python/สคริปต์/กุญแจ/ไฟล์เฟิร์มแวร์มาจาก config ฝั่งเครื่องเท่านั้น
 - เขียนเฟิร์มแวร์ได้เฉพาะ pairing ที่อยู่ใน `writeClients` และ `allowFirmwareWrite: true` · ใช้ได้ทั้งรุ่นติดตั้งและ Portable · คู่มือ `docs/SDP_OTA.md`
-- **ยังไม่ได้ทดสอบ:** กับบอร์ดจริงผ่าน Connect (ทดสอบด้วย CLI จำลองเท่านั้น) และยังไม่ได้ออกรุ่นให้เครื่องที่ติดตั้งไว้
+- ทดสอบกับ ESP32 จริงแล้ว: `cargo test --test api sdp_ota_live -- --ignored --nocapture` (ต้องตั้ง `SYNAPTA_SDP_OTA_LIVE_CONFIG`
+  และ `SYNAPTA_SDP_OTA_LIVE_TARGET`) อัปเดต `ota-bench-wifi-110` → `111` ผ่าน Wi-Fi ได้ verified ใน 19 วินาที
+- **ยังไม่ได้ทดสอบ:** อัปเดตอัตโนมัติจาก v0.3.18 → v0.3.19 บนเครื่องที่ติดตั้งจริง และ Portable ตัวที่ build บน MSI บน Server 2016
 - โหมดพกพา (Portable) ทำแล้วใน commit `a52bbc1` — บรีฟและสถานะอยู่ใน `docs/PORTABLE_MODE.md`
 
 ### รอบ v0.3.7 · panel 0.1.4 (2026-11-22) — เปิด panel ได้จริงบน Server 2016 + สั่งอัปเดตจากระยะไกล
