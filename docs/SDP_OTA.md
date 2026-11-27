@@ -1,5 +1,9 @@
 # SDP OTA ใน Synapta Connect
 
+> คนที่เพิ่งเริ่มใช้ ESP32 กับ SDP: อ่าน `tools/sdp-ota/GUIDE.md` ใน SDP checkout หรือพิมพ์ `sdpo guide`
+> ในนั้นมีขั้นเตรียมบอร์ด เขียน `main/app.c` (เริ่มด้วย `sdpo new FOLDER --example blink`) และ Build แล้วอัปโหลด
+> ปุ่ม Build แล้วอัปโหลดแบบกดครั้งเดียวมีใน SynaptaCode ส่วน Connect ทำหน้าที่เป็นเครื่อง build ให้ และรับ RPC ด้านล่างเท่านั้น
+
 รัน Connect (service, console หรือ Portable) บน **เครื่องอัปโหลด** — เครื่องนี้ต้องเข้าถึงบอร์ดผ่านวงแลนได้ และมีไฟล์แอปที่เซ็นแล้ว
 ส่วนเครื่อง compile แยกเป็นอีกเครื่องได้ (เช่น `app01`) Connect อ่าน `tools/sdp-ota/module.json` และรัน `tools/sdp-ota/sdp_ota.py`
 จาก SDP checkout ที่ตั้งไว้โดยตรง เครื่องอัปโหลดต้องมี Python 3.11 ขึ้นไป
